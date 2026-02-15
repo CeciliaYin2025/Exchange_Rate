@@ -1,0 +1,10 @@
+email:
+  smtp_server: "<SMTP_SERVER_IP>"
+  port: 25
+  sender_email: "<SENDER_EMAIL>"
+  password: ""
+  receiver_emails_success: "<SUCCESS_RECIPIENT_EMAIL>"
+  #  - "<ADDITIONAL_RECIPIENT>"
+  receiver_emails_failure:
+    - "<FAILURE_RECIPIENT_1>"
+    - "<FAILURE_RECIPIENT_2>"

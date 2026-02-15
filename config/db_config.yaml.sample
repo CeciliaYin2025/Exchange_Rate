@@ -1,0 +1,46 @@
+database:
+  driver: "ODBC Driver 17 for SQL Server"
+  server: "<SQL_SERVER_IP>"
+  database: "<DATABASE_NAME>"
+  username: "<USERNAME>"
+  password: "<PASSWORD>"
+
+database_bi:
+  driver: "SQL Server"
+  server: "<SQL_SERVER_IP>"
+  database: "<DATABASE_NAME>"
+  username: "<USERNAME>"
+  password: "<PASSWORD>"
+
+database_notes:
+  driver: "SQL Server"
+  server: "<SQL_SERVER_IP>"
+  database: "<DATABASE_NAME>"
+  username: "<USERNAME>"
+  password: "<PASSWORD>"
+
+dev_db:
+  driver: "ODBC Driver 17 for SQL Server"
+  server: "<SQL_SERVER_IP>"
+  database: "<DATABASE_NAME>"
+  username: "<USERNAME>"
+  password: "<PASSWORD>"
+
+oracle_db_query:
+    user: "<USERNAME>"
+    password: "<PASSWORD>"
+    host: "<ORACLE_HOST>"
+    port: "1531"
+    service_name: "<SERVICE_NAME>"
+
+# write into ERP db
+oracle_db_insert:
+    user: "<USERNAME>"
+    password: "<PASSWORD>"
+    host: "<ORACLE_HOST>"
+    port: "1531"
+    service_name: "<SERVICE_NAME>"
+    # Oracle Instant Client path (Thick mode, required for Oracle 11g)
+    # Windows: C:\Oracle_instantclient_11_2
+    # Ubuntu:  /opt/oracle/instantclient_23_0
+    client_lib_dir: "<ORACLE_INSTANT_CLIENT_PATH>"
