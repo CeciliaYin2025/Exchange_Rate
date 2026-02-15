@@ -18,3 +18,7 @@ logs/
 snapshots/
 data/
 reports/
+
+# Local settings
+.claude/settings.local.json
+nul
