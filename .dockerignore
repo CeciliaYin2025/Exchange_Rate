@@ -1,0 +1,43 @@
+# Version control
+.git
+.gitignore
+
+# Virtual environments
+.venv
+
+# Config files (contain credentials - mounted at runtime)
+config/db_config.yaml
+config/email_config.yaml
+
+# Runtime output (mounted at runtime)
+logs/
+data/
+snapshots/
+reports/
+
+# Python caches
+__pycache__/
+*.py[oc]
+*.egg-info
+build/
+dist/
+wheels/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Misc
+*.md
+nul
+test/

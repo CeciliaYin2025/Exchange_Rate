@@ -150,7 +150,7 @@ def connect_to_db_sql():
 
 def connect_to_db_oracle():
     db_config = load_oracle_config('config/db_config.yaml')
-    client_lib_dir = db_config.get('client_lib_dir')
+    client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
     try:
         oracledb.init_oracle_client(lib_dir=client_lib_dir)
     except oracledb.ProgrammingError:

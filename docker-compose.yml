@@ -1,0 +1,13 @@
+services:
+  exchange-rate:
+    build: .
+    shm_size: "2gb"
+    restart: "no"
+    environment:
+      - TZ=Asia/Taipei
+      - ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient_23_7
+    volumes:
+      - ./config/db_config.yaml:/app/config/db_config.yaml:ro
+      - ./config/email_config.yaml:/app/config/email_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
