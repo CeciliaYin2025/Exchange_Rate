@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     curl \
     unzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/x86_64-linux-gnu/libaio.so.1t64 /usr/lib/x86_64-linux-gnu/libaio.so.1
 
 # Google Chrome (for Selenium)
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
@@ -36,6 +37,7 @@ RUN mkdir -p /opt/oracle && cd /opt/oracle \
 
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_23_7:${LD_LIBRARY_PATH}
 ENV ORACLE_CLIENT_LIB_DIR=/opt/oracle/instantclient_23_7
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Copy uv from builder stage
 COPY --from=uv /uv /usr/local/bin/uv
