@@ -18,11 +18,6 @@ python ImportWebRate.py
 # Portal rates (EUR, JPY, USD from customs portal JSON API)
 python ImportPortalRate.py
 
-# Legacy monthly rates script (older version of ImportWebRate.py)
-python ImportMonthlyRate.py
-
-# Scheduled execution via batch file
-run_daily.bat
 ```
 
 Python 3.11 managed with `uv`. Virtual environment at `.venv/`.
