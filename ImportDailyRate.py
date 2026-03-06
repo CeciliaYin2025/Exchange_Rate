@@ -431,16 +431,17 @@ def get_daily_rate_with_usd(rates, usd_rate):
     rates_with_usd = {}
     for currency in USD_CURRENCIES:
         twd_rate = rates.get(currency, 0)
+        # XXX/TWD ÷ USD/TWD = XXX/USD（例: EUR 36.77 / USD 31.683 = EUR→USD 1.16）
         combined_rate = round(twd_rate / usd_rate, 4) if usd_rate != 0 else 0
         rates_with_usd[currency] = combined_rate
 
         rate_val = combined_rate
         rev_rate_val = 1 / rate_val if rate_val != 0 else 0
 
-        row_usd = build_rate_rows('USD', currency, rate_val, conversion_date)
-        rows.append(row_usd)
+        row_fwd = build_rate_rows(currency, 'USD', rate_val, conversion_date)
+        rows.append(row_fwd)
 
-        row_rev = build_rate_rows(currency, 'USD', rev_rate_val, conversion_date)
+        row_rev = build_rate_rows('USD', currency, rev_rate_val, conversion_date)
         rows.append(row_rev)
 
     logger.info(f"get_daily_rate_with_usd(): {rates_with_usd}, {conversion_date}")
@@ -690,9 +691,9 @@ def insert_to_oracle(rates, usd_rate, usd_rows, conversion_date):
                 'CONVERSION_RATE': rate,
             })
 
-        # USD-based: 只寫入正向（USD→XXX），過濾反向（XXX→USD）
+        # USD-based: 只寫入正向（XXX→USD），過濾反向（USD→XXX）
         for row in usd_rows:
-            if row['from_currency'] == 'USD':
+            if row['to_currency'] == 'USD':
                 oracle_rows.append((
                     'TW_BANK', row['from_currency'], row['to_currency'], conv_dt, conv_dt,
                     row['conversion_rate'], 'I', now, 'N', 'SC_銀行匯率'

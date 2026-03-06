@@ -857,7 +857,7 @@ async def _async_run():
         all_rates = {
             'INR': (usd_rate, inr_rate),
             'MXN': (usd_rate, mxn_rate),
-            'TRY': (1, try_rate)
+            'TRY': (try_rate, 1)  # TRYTWD 已是 TRY→TWD，直接使用
         }
 
         # ===== Step 3: SQL Server 寫入 =====
