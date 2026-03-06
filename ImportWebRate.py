@@ -299,7 +299,7 @@ def get_latest_usdtwd_rate_from_cbc():
             if not table:
                 return None
 
-            possible_dates = [(date.today() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(1, 16)]
+            possible_dates = [(date.today() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(0, 15)]
 
             rows = table.find_all("tr")
             for row in rows:
@@ -351,7 +351,7 @@ async def fetch_currency_rate_selenium(driver, target_date_obj, currency_pair):
 
 async def fetch_rate_with_fallback(driver, currency_name, currency_pair):
     """共用 driver 的回溯工具，最多回溯 14 天。"""
-    for i in range(1, 15):
+    for i in range(0, 15):
         target_date = (date.today() - timedelta(days=i))
         rate = await fetch_currency_rate_selenium(driver, target_date, currency_pair)
         if rate:
@@ -473,7 +473,10 @@ def insert_to_oracle(rows_data):
         inserted_data = []
         now = datetime.now()
 
+        # 只寫入正向匯率（XXX→TWD），不寫入反向（TWD→XXX）
         for r in rows_data:
+            if r['from_cur'] == 'TWD':
+                continue
             rate_date = datetime.strptime(r['rate_date'], '%Y-%m-%d')
             oracle_rows.append((
                 'TW_BANK', r['from_cur'], r['to_cur'], rate_date, rate_date,
@@ -512,9 +515,29 @@ def insert_to_oracle(rows_data):
 
         cursor.executemany(insert_sql, oracle_rows)
         connection.commit()
+        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
+
+        # 執行 sglp0021_pkg.main 將 TEMP 資料轉入正式表
+        logger.info("開始執行 sglp0021_pkg.main ...")
+        cursor2 = connection.cursor()
+        l_errbuf = cursor2.var(oracledb.STRING, 2000)
+        l_retcode = cursor2.var(oracledb.STRING, 10)
+        cursor2.execute("""
+            BEGIN
+                APPS.sglp0021_pkg.main(:errbuf, :retcode);
+            END;
+        """, {'errbuf': l_errbuf, 'retcode': l_retcode})
+        connection.commit()
+        errbuf_val = l_errbuf.getvalue()
+        retcode_val = l_retcode.getvalue()
+        cursor2.close()
+        logger.info(f"sglp0021_pkg.main 執行完成。retcode={retcode_val}, errbuf={errbuf_val}")
+
+        if str(retcode_val) != '0':
+            raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
+
         cursor.close()
 
-        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
         return inserted_data
 
     except Exception as e:
@@ -548,7 +571,7 @@ def build_monthly_rate_table(rows_data, conversion_date):
     )
 
 def query_oracle_bank_rates():
-    """從 Oracle 查詢最新寫入的 SC_銀行匯率 資料（INR, MXN, TRY），用於 Email 通知表格。"""
+    """從 Oracle GL_DAILY_RATES_V 查詢最新寫入的 SC_銀行匯率 資料（INR, MXN, TRY），用於 Email 通知表格。"""
     connection = None
     try:
         connection = connect_to_db_oracle()
@@ -558,10 +581,10 @@ def query_oracle_bank_rates():
 
         cursor = connection.cursor()
         sql = """
-            SELECT FROM_CURRENCY, TO_CURRENCY, FROM_DATE,
+            SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
                    USER_CONVERSION_TYPE, CONVERSION_RATE
-            FROM YSC.SGLP0021_TEMP
-            WHERE TRUNC(IMPORTED_DATE) = TRUNC(SYSDATE)
+            FROM APPS.GL_DAILY_RATES_V
+            WHERE TRUNC(CONVERSION_DATE) = TRUNC(SYSDATE + 1)
               AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
               AND (FROM_CURRENCY IN ('INR', 'MXN', 'TRY') OR TO_CURRENCY IN ('INR', 'MXN', 'TRY'))
             ORDER BY FROM_CURRENCY, TO_CURRENCY
@@ -571,7 +594,7 @@ def query_oracle_bank_rates():
         columns = [desc[0] for desc in cursor.description]
         cursor.close()
 
-        logger.info(f"Oracle 查詢到 {len(rows)} 筆 SC_銀行匯率 資料 (INR/MXN/TRY)")
+        logger.info(f"Oracle GL_DAILY_RATES_V 查詢到 {len(rows)} 筆 SC_銀行匯率 資料 (INR/MXN/TRY)")
         return [dict(zip(columns, row)) for row in rows]
 
     except Exception as e:
@@ -588,7 +611,7 @@ def build_oracle_rate_table(oracle_rows):
     for row in oracle_rows:
         rate = float(row['CONVERSION_RATE'])
         inv_rate = round(1 / rate, 6) if rate != 0 else 0
-        conv_date = row['FROM_DATE']
+        conv_date = row.get('CONVERSION_DATE') or row.get('FROM_DATE')
         if isinstance(conv_date, datetime):
             conv_date_str = conv_date.strftime('%m-%d-%y')
         else:
@@ -642,7 +665,7 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
             logger.warning("資料庫中查無今日匯率資料，未發送報表。")
             return
 
-        # === Sheet 2: Oracle ERP ===
+        # === Sheet 2: Oracle ERP (GL_DAILY_RATES_V) ===
         df_oracle = pd.DataFrame()
         oracle_conn = None
         try:
@@ -650,16 +673,15 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
             if oracle_conn:
                 oracle_cursor = oracle_conn.cursor()
                 oracle_sql = """
-                    SELECT SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
-                           CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
-                           USER_CONVERSION_TYPE
-                    FROM YSC.SGLP0021_TEMP
-                    WHERE TRUNC(FROM_DATE) = TRUNC(:1)
+                    SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
+                           USER_CONVERSION_TYPE, CONVERSION_RATE
+                    FROM APPS.GL_DAILY_RATES_V
+                    WHERE TRUNC(CONVERSION_DATE) = TRUNC(SYSDATE + 1)
                       AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
                       AND FROM_CURRENCY IN ('INR', 'MXN', 'TRY')
                     ORDER BY FROM_CURRENCY, TO_CURRENCY
                 """
-                oracle_cursor.execute(oracle_sql, [datetime.now()])
+                oracle_cursor.execute(oracle_sql)
                 oracle_rows = oracle_cursor.fetchall()
                 oracle_columns = [desc[0] for desc in oracle_cursor.description]
                 oracle_cursor.close()
@@ -676,7 +698,7 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
         # === 產生 Excel 檔案 (3 Sheets) ===
         output_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
         os.makedirs(output_dir, exist_ok=True)
-        excel_file_name = f"Monthly_Exchange_Rates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        excel_file_name = f"Daily_Exchange_Rates_INR_MXN_TRY_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         excel_file_path = os.path.join(output_dir, excel_file_name)
 
         with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:
@@ -786,13 +808,23 @@ def _build_step_status_html(step_results):
 # === Main Entry Point ===
 logger = logging.getLogger(__name__)
 
-async def async_main():
+async def _async_run():
+    """內部 async 執行邏輯，回傳結果 dict。"""
     setup_logging(log_dir='./logs')
     logger.info("--- Monthly Rate Process Started ---")
 
     start_time = time.time()
     current_step = ""
     step_results = []
+    result_data = {
+        'success': False,
+        'step_results': step_results,
+        'rows': None,
+        'oracle_inserted_data': None,
+        'snapshot_paths': {},
+        'excel_file_path': None,
+        'error': None,
+    }
 
     options = webdriver.ChromeOptions()
     options.add_argument('--headless')
@@ -842,29 +874,174 @@ async def async_main():
         else:
             step_results.append(("Step 4: Oracle", "無資料需要寫入"))
 
-        # ===== Step 5: 報表寄送 =====
-        current_step = "Step 5: 報表寄送"
-        export_monthly_report_and_email(rows, step_results, oracle_inserted_data=oracle_inserted_data)
-        logger.info("資料庫匯率更新成功。")
+        # ===== Step 5: 產生 Excel 報表（不寄送 Email）=====
+        current_step = "Step 5: 產生報表"
+        excel_file_path = _export_web_excel(rows, oracle_inserted_data)
+        step_results.append(("Step 5: 產生報表", "Excel 產生完成"))
+
+        _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
+        result_data.update({
+            'success': True,
+            'rows': rows,
+            'oracle_inserted_data': oracle_inserted_data,
+            'snapshot_paths': {
+                'inr_img': f"{_snap_dir}/USDINR_snapshot.jpg",
+                'mxn_img': f"{_snap_dir}/USDMXN_snapshot.jpg",
+                'try_img': f"{_snap_dir}/TRYTWD_snapshot.jpg",
+            },
+            'excel_file_path': excel_file_path,
+        })
 
     except Exception as e:
         logger.error(f"工作執行失敗 [{current_step}]: {e}")
         step_results.append((current_step, f"失敗 - {e}"))
-        status_html = _build_step_status_html(step_results)
-        send_email_notification(
-            subject=f"【錯誤報告】月匯率程式異常 - {datetime.now().strftime('%Y-%m-%d')}",
-            body=f"<p>程式於 <b>{current_step}</b> 階段執行失敗。</p>"
-                 f"<p>錯誤訊息：</p><pre>{e}</pre>"
-                 f"<br>{status_html}",
-            file_path=None,
-            mailtype="error"
-        )
+        result_data['error'] = str(e)
     finally:
         driver.quit()
         logger.info(f"執行完畢，耗時: {time.time() - start_time:.2f} 秒")
 
     logger.info("--- Monthly Rate Process Finished ---")
+    return result_data
+
+
+def _export_web_excel(rows_data, oracle_inserted_data):
+    """產生 Monthly Excel 報表（3 Sheets），回傳檔案路徑。"""
+    connection = None
+    try:
+        # === Sheet 1: SQL Server ===
+        connection = connect_to_db_sql()
+        if connection is None:
+            logger.warning("無法連線資料庫查詢報表資料。")
+            return None
+
+        sql_query = """
+        SELECT from_currency, to_currency, from_conversion_date,
+               conversion_rate, inverse_conversion_rate
+        FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+        WHERE from_currency IN ('INR', 'MXN', 'TRY')
+          AND from_conversion_date = (
+              SELECT MAX(from_conversion_date)
+              FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+              WHERE from_currency IN ('INR', 'MXN', 'TRY')
+          )
+        ORDER BY from_currency, to_currency
+        """
+        cursor = connection.cursor()
+        cursor.execute(sql_query)
+        sql_rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        cursor.close()
+        connection.close()
+        connection = None
+
+        df_sql = pd.DataFrame(sql_rows, columns=columns)
+
+        # === Sheet 2: Oracle ERP (GL_DAILY_RATES_V) ===
+        df_oracle = pd.DataFrame()
+        oracle_conn = None
+        try:
+            oracle_conn = connect_to_db_oracle()
+            if oracle_conn:
+                oracle_cursor = oracle_conn.cursor()
+                oracle_sql = """
+                    SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
+                           USER_CONVERSION_TYPE, CONVERSION_RATE
+                    FROM APPS.GL_DAILY_RATES_V
+                    WHERE TRUNC(CONVERSION_DATE) = TRUNC(SYSDATE + 1)
+                      AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
+                      AND FROM_CURRENCY IN ('INR', 'MXN', 'TRY')
+                    ORDER BY FROM_CURRENCY, TO_CURRENCY
+                """
+                oracle_cursor.execute(oracle_sql)
+                oracle_rows = oracle_cursor.fetchall()
+                oracle_columns = [desc[0] for desc in oracle_cursor.description]
+                oracle_cursor.close()
+                df_oracle = pd.DataFrame(oracle_rows, columns=oracle_columns)
+        except Exception as e:
+            logger.warning(f"Oracle 查詢失敗，Oracle ERP sheet 將為空白: {e}")
+        finally:
+            if oracle_conn:
+                oracle_conn.close()
+
+        # === 產生 Excel 檔案 ===
+        output_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
+        os.makedirs(output_dir, exist_ok=True)
+        excel_file_name = f"Daily_Exchange_Rates_INR_MXN_TRY_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        excel_file_path = os.path.join(output_dir, excel_file_name)
+
+        with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:
+            df_sql.to_excel(writer, index=False, sheet_name='SQL Server')
+            if not df_oracle.empty:
+                df_oracle.to_excel(writer, index=False, sheet_name='Oracle ERP')
+            else:
+                pd.DataFrame().to_excel(writer, index=False, sheet_name='Oracle ERP')
+            pd.DataFrame().to_excel(writer, index=False, sheet_name='Screenshots')
+
+        # Embed screenshot images into Sheet 3
+        _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
+        screenshot_info = [
+            ('USDINR_snapshot.jpg', 'INR (USD/INR)'),
+            ('USDMXN_snapshot.jpg', 'MXN (USD/MXN)'),
+            ('TRYTWD_snapshot.jpg', 'TRY (TRY/TWD)'),
+        ]
+
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_file_path)
+        ws = wb['Screenshots']
+        current_row = 1
+        IMG_HEIGHT_PX = 600
+        ROW_HEIGHT_PX = 18.75
+        ROWS_PER_IMAGE = int(IMG_HEIGHT_PX / ROW_HEIGHT_PX) + 2
+        for img_file, label in screenshot_info:
+            img_path = os.path.join(_snap_dir, img_file)
+            ws[f'A{current_row}'] = label
+            current_row += 1
+            if os.path.exists(img_path):
+                img = XlImage(img_path)
+                img.width = 600
+                img.height = IMG_HEIGHT_PX
+                ws.add_image(img, f'A{current_row}')
+            current_row += ROWS_PER_IMAGE
+        wb.save(excel_file_path)
+
+        logger.info(f"Excel 報表已產生: {excel_file_path}")
+        return excel_file_path
+
+    except Exception as e:
+        logger.error(f"匯出報表失敗: {e}")
+        raise
+    finally:
+        if connection:
+            connection.close()
+
+
+def run():
+    """
+    同步入口：執行月匯率抓取與寫入流程，回傳結果 dict 供主程式彙整。
+    回傳格式:
+    {
+        'success': bool,
+        'step_results': list of (step_name, result_text),
+        'rows': list,
+        'oracle_inserted_data': list or None,
+        'snapshot_paths': dict,   # cid_name -> file_path
+        'excel_file_path': str or None,
+        'error': str or None,
+    }
+    """
+    return asyncio.run(_async_run())
 
 
 if __name__ == "__main__":
-    asyncio.run(async_main())
+    result = run()
+    if not result['success']:
+        # 獨立執行時，失敗寄送錯誤通知
+        status_html = _build_step_status_html(result['step_results'])
+        send_email_notification(
+            subject=f"【錯誤報告】月匯率程式異常 - {datetime.now().strftime('%Y-%m-%d')}",
+            body=f"<p>程式執行失敗。</p>"
+                 f"<p>錯誤訊息：</p><pre>{result['error']}</pre>"
+                 f"<br>{status_html}",
+            file_path=None,
+            mailtype="error"
+        )

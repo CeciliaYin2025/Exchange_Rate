@@ -253,7 +253,7 @@ def build_portal_rate_table(filtered_items, start, end):
     )
 
 def query_oracle_portal_rates(start, end):
-    """從 Oracle 查詢最新寫入的 SC_三旬匯率 資料，用於 Email 通知表格。"""
+    """從 Oracle GL_DAILY_RATES_V 查詢最新寫入的 SC_三旬匯率 資料，用於 Email 通知表格。"""
     connection = None
     try:
         connection = connect_to_db_oracle()
@@ -266,19 +266,19 @@ def query_oracle_portal_rates(start, end):
 
         cursor = connection.cursor()
         sql = """
-            SELECT FROM_CURRENCY, TO_CURRENCY, FROM_DATE,
+            SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
                    USER_CONVERSION_TYPE, CONVERSION_RATE
-            FROM YSC.SGLP0021_TEMP
-            WHERE FROM_DATE BETWEEN :1 AND :2
+            FROM APPS.GL_DAILY_RATES_V
+            WHERE CONVERSION_DATE BETWEEN :1 AND :2
               AND USER_CONVERSION_TYPE = 'SC_三旬匯率'
-            ORDER BY FROM_CURRENCY, TO_CURRENCY, FROM_DATE
+            ORDER BY FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE
         """
         cursor.execute(sql, [start_date, end_date])
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
         cursor.close()
 
-        logger.info(f"Oracle 查詢到 {len(rows)} 筆 SC_三旬匯率 資料")
+        logger.info(f"Oracle GL_DAILY_RATES_V 查詢到 {len(rows)} 筆 SC_三旬匯率 資料")
         return [dict(zip(columns, row)) for row in rows]
 
     except Exception as e:
@@ -433,11 +433,11 @@ def insert_portal_rates_oracle(filtered_items, start, end):
         start_dt = datetime.strptime(start, '%Y%m%d')
         end_dt = datetime.strptime(end, '%Y%m%d')
 
+        # 只寫入正向匯率（XXX→TWD），不寫入反向（TWD→XXX）
         oracle_rows = []
         inserted_data = []
         for item in filtered_items:
             base_rate = float(item["buyValue"])
-            inverse_rate = round(1 / base_rate, 6) if base_rate != 0 else 0
 
             oracle_rows.append((
                 'TW_BANK', item["code"], 'TWD', start_dt, end_dt,
@@ -448,16 +448,6 @@ def insert_portal_rates_oracle(filtered_items, start, end):
                 'FROM_DATE': start_dt, 'TO_DATE': end_dt,
                 'USER_CONVERSION_TYPE': 'SC_三旬匯率',
                 'CONVERSION_RATE': base_rate,
-            })
-            oracle_rows.append((
-                'TW_BANK', 'TWD', item["code"], start_dt, end_dt,
-                inverse_rate, 'I', start_dt, 'N', 'SC_三旬匯率'
-            ))
-            inserted_data.append({
-                'FROM_CURRENCY': 'TWD', 'TO_CURRENCY': item["code"],
-                'FROM_DATE': start_dt, 'TO_DATE': end_dt,
-                'USER_CONVERSION_TYPE': 'SC_三旬匯率',
-                'CONVERSION_RATE': inverse_rate,
             })
 
         # 先刪除同期間的 SC_三旬匯率 資料（含先前每日展開的舊資料），避免重複
@@ -481,9 +471,29 @@ def insert_portal_rates_oracle(filtered_items, start, end):
 
         cursor.executemany(insert_sql, oracle_rows)
         connection.commit()
+        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆三旬匯率")
+
+        # 執行 sglp0021_pkg.main 將 TEMP 資料轉入正式表
+        logger.info("開始執行 sglp0021_pkg.main ...")
+        cursor2 = connection.cursor()
+        l_errbuf = cursor2.var(oracledb.STRING, 2000)
+        l_retcode = cursor2.var(oracledb.STRING, 10)
+        cursor2.execute("""
+            BEGIN
+                APPS.sglp0021_pkg.main(:errbuf, :retcode);
+            END;
+        """, {'errbuf': l_errbuf, 'retcode': l_retcode})
+        connection.commit()
+        errbuf_val = l_errbuf.getvalue()
+        retcode_val = l_retcode.getvalue()
+        cursor2.close()
+        logger.info(f"sglp0021_pkg.main 執行完成。retcode={retcode_val}, errbuf={errbuf_val}")
+
+        if str(retcode_val) != '0':
+            raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
+
         cursor.close()
 
-        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆三旬匯率")
         return inserted_data
 
     except Exception as e:
@@ -515,30 +525,36 @@ def _build_step_status_html(step_results):
 logger = logging.getLogger(__name__)
 
 def _build_excel_sheets(filtered_items, start, end, raw_data):
-    """建構 Excel 3 sheets 的 DataFrame dict。"""
+    """建構 Excel 4 sheets 的 DataFrame dict。"""
     start_dt = datetime.strptime(start, '%Y%m%d')
     end_dt = datetime.strptime(end, '%Y%m%d')
 
-    # Sheet 1: Oracle_SGLP0021_TEMP
-    oracle_rows = []
-    for item in filtered_items:
-        base_rate = float(item["buyValue"])
-        inverse_rate = round(1 / base_rate, 6) if base_rate != 0 else 0
-        oracle_rows.append({
-            'SOURCE_FROM': 'TW_BANK', 'FROM_CURRENCY': item["code"],
-            'TO_CURRENCY': 'TWD', 'FROM_DATE': start_dt, 'TO_DATE': end_dt,
-            'CONVERSION_RATE': base_rate, 'MODE_FLAG': 'I',
-            'IMPORTED_DATE': start_dt, 'IMPORTED_FLAG': 'N',
-            'USER_CONVERSION_TYPE': 'SC_三旬匯率',
-        })
-        oracle_rows.append({
-            'SOURCE_FROM': 'TW_BANK', 'FROM_CURRENCY': 'TWD',
-            'TO_CURRENCY': item["code"], 'FROM_DATE': start_dt, 'TO_DATE': end_dt,
-            'CONVERSION_RATE': inverse_rate, 'MODE_FLAG': 'I',
-            'IMPORTED_DATE': start_dt, 'IMPORTED_FLAG': 'N',
-            'USER_CONVERSION_TYPE': 'SC_三旬匯率',
-        })
-    df_oracle = pd.DataFrame(oracle_rows)
+    # Sheet 1: Oracle ERP (GL_DAILY_RATES_V)
+    df_oracle_erp = pd.DataFrame()
+    oracle_conn = None
+    try:
+        oracle_conn = connect_to_db_oracle()
+        if oracle_conn:
+            oracle_cursor = oracle_conn.cursor()
+            oracle_sql = """
+                SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
+                       USER_CONVERSION_TYPE, CONVERSION_RATE
+                FROM APPS.GL_DAILY_RATES_V
+                WHERE CONVERSION_DATE BETWEEN :1 AND :2
+                  AND USER_CONVERSION_TYPE = 'SC_三旬匯率'
+                ORDER BY FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE
+            """
+            oracle_cursor.execute(oracle_sql, [start_dt, end_dt])
+            oracle_rows_db = oracle_cursor.fetchall()
+            oracle_columns = [desc[0] for desc in oracle_cursor.description]
+            oracle_cursor.close()
+            df_oracle_erp = pd.DataFrame(oracle_rows_db, columns=oracle_columns)
+            logger.info(f"Oracle ERP 查詢到 {len(df_oracle_erp)} 筆三旬匯率資料")
+    except Exception as e:
+        logger.warning(f"Oracle 查詢失敗，Oracle ERP sheet 將為空白: {e}")
+    finally:
+        if oracle_conn:
+            oracle_conn.close()
 
     # Sheet 2: DWNotes_DAILY_RATES
     dwnotes_rows = []
@@ -565,7 +581,7 @@ def _build_excel_sheets(filtered_items, start, end, raw_data):
     df_api = pd.DataFrame(raw_data.get('items', []))
 
     return {
-        'Oracle_SGLP0021_TEMP': df_oracle,
+        'Oracle ERP': df_oracle_erp,
         'DWNotes_DAILY_RATES': df_dwnotes,
         'API_Raw_Data': df_api,
     }
@@ -620,8 +636,11 @@ def main():
 
         # ===== Step 5: 報表寄送 =====
         current_step = "Step 5: 報表寄送"
-        # 使用本次執行匯入 Oracle 的資料建構 Email 表格
-        if oracle_inserted_data:
+        # 從 GL_DAILY_RATES_V 查詢匯率資料建構 Email 表格
+        gl_rates = query_oracle_portal_rates(start, end)
+        if gl_rates:
+            rate_table_html = build_oracle_portal_rate_table(gl_rates, start, end)
+        elif oracle_inserted_data:
             rate_table_html = build_oracle_portal_rate_table(oracle_inserted_data, start, end)
         else:
             rate_table_html = build_portal_rate_table(filtered_items, start, end)
