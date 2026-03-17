@@ -7,7 +7,7 @@
 | 腳本 | 資料來源 | 幣別 | 擷取方式 |
 |------|----------|------|----------|
 | `ImportDailyRate.py` | 央行 (cbc.gov.tw) + 台銀 (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD | requests + BeautifulSoup；Playwright 截圖 |
-| `ImportWebRate.py` | 央行 + 鉅亨網 (invest.cnyes.com) | INR, MXN, TRY | Selenium 抓取；async Playwright 截圖 |
+| `ImportWebRate.py` | 央行 + 鉅亨網 (invest.cnyes.com) | INR, MXN, TRY | Selenium 抓取；假日模式由 Oracle 取得前一交易日匯率 |
 | `ImportPortalRate.py` | 關務署 JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD | requests (JSON API) |
 | `RunAllRates.py` | 合併執行 Daily + Web | 全部銀行匯率幣別 | 統一 Email 通知 |
 
@@ -18,7 +18,7 @@
 合併執行 `ImportDailyRate` 和 `ImportWebRate`，統一發送一封 Email 通知：
 
 1. **執行 ImportDailyRate** — 擷取 CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD 匯率
-2. **執行 ImportWebRate** — 擷取 INR, MXN, TRY 匯率
+2. **執行 ImportWebRate** — 擷取 INR, MXN, TRY 匯率（假日時從 Oracle 取前一交易日匯率）
 3. **查詢 Oracle ERP** — 從 `APPS.GL_DAILY_RATES_V` 取得正式匯率資料
 4. **合併 Email 通知** — 包含所有步驟狀態、匯率表格、截圖與 Excel 附件
 
@@ -27,13 +27,14 @@
 每支腳本皆可獨立執行，流程如下：
 
 1. **擷取匯率** — 從銀行網站或 API 抓取最新匯率（優先取當天，找不到往前回溯最多 14 天）
-2. **計算衍生匯率** — 例如以 USD/TWD 為基準計算 XXX→USD 交叉匯率
-3. **寫入 SQL Server** — 透過 MERGE (Upsert) 寫入，雙向（正向 + 反向）
-4. **寫入 Oracle TEMP** — 只寫入正向匯率至 `YSC.SGLP0021_TEMP`
-5. **執行 SGLP0021_PKG.MAIN** — 將 TEMP 資料轉入 Oracle ERP 正式表（retcode != 0 視為錯誤）
-6. **產生 Excel 報表** — 含多個 Sheet (Web Source / SQL Server / Oracle ERP)
-7. **網頁截圖** — 保存來源網頁截圖作為佐證 (存於 `data/`)
-8. **Email 通知** — 附帶截圖與 Excel 附件；異常時發送錯誤通知信
+2. **假日判斷** — `ImportWebRate` 比對 CBC 匯率日期與系統日期；日期不符即切換假日模式，從 Oracle 取前一交易日匯率
+3. **計算衍生匯率** — 例如以 USD/TWD 為基準計算 XXX→USD 交叉匯率
+4. **寫入 SQL Server** — 透過 MERGE (Upsert) 寫入，雙向（正向 + 反向）
+5. **寫入 Oracle TEMP** — 只寫入正向匯率至 `YSC.SGLP0021_TEMP`
+6. **執行 SGLP0021_PKG.MAIN** — 將 TEMP 資料轉入 Oracle ERP 正式表（retcode != 0 視為錯誤）
+7. **產生 Excel 報表** — 含多個 Sheet (SQL Server / Oracle ERP / Screenshots)
+8. **網頁截圖** — 保存來源網頁截圖（`.png` 格式）作為佐證 (存於 `data/`)
+9. **Email 通知** — 附帶截圖與 Excel 附件；異常時發送錯誤通知信
 
 ## 環境需求
 

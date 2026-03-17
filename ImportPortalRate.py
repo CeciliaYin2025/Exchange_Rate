@@ -54,10 +54,38 @@ def _get_daily_log_filepath(log_dir, prefix='currency_portal'):
             return seq_path
         seq += 1
 
+def _cleanup_old_logs(log_dir, days=14):
+    """刪除 log_dir 中超過 days 天的 .log 檔案。"""
+    cutoff = datetime.now().timestamp() - days * 86400
+    for fname in os.listdir(log_dir):
+        if not fname.endswith('.log'):
+            continue
+        fpath = os.path.join(log_dir, fname)
+        if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+
+def _cleanup_old_data(data_dir, days=14):
+    """刪除 data_dir 中超過 days 天的日期子目錄（含其內容）。"""
+    if not os.path.isdir(data_dir):
+        return
+    cutoff = datetime.now().timestamp() - days * 86400
+    for dname in os.listdir(data_dir):
+        dpath = os.path.join(data_dir, dname)
+        if os.path.isdir(dpath) and os.path.getmtime(dpath) < cutoff:
+            try:
+                import shutil
+                shutil.rmtree(dpath)
+            except OSError:
+                pass
+
 def setup_logging(log_dir='./logs'):
     """
     設定日誌系統，將輸出同時寫入控制台和日誌檔案。
     日誌檔名依日期產生，同日重複執行時自動加流水號。
+    啟動時自動清除超過 14 天的舊 log 檔。
     """
     global logger
 
@@ -65,6 +93,8 @@ def setup_logging(log_dir='./logs'):
     logger.setLevel(logging.INFO)
 
     if not logger.handlers:
+        _cleanup_old_logs(log_dir)
+        _cleanup_old_data('./data/portal')
         log_filepath = _get_daily_log_filepath(log_dir)
         file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
         file_formatter = logging.Formatter(
@@ -226,7 +256,7 @@ def fetch_json():
             item['conversion_rate'] = conversion_rate
             log_and_collect(
                 f"Code: {item['code']}, Buy Value: {item['buyValue']}, "
-                f"Start: {json_start}, End: {json_end}, Conversion Rate: {conversion_rate:.6f}"
+                f"Start: {json_start}, End: {json_end}, Conversion Rate: {conversion_rate:.4f}"
             )
         except (ValueError, ZeroDivisionError) as e:
             logger.error(f"Error calculating rate for {item['code']}: {e}")
@@ -242,7 +272,7 @@ def build_portal_rate_table(filtered_items, start, end):
         portal_rows += row_tmpl.substitute(
             code=item['code'],
             buy_value=item['buyValue'],
-            conversion_rate=f"{item.get('conversion_rate', 0):.6f}",
+            conversion_rate=f"{item.get('conversion_rate', 0):.4f}",
         )
 
     table_tmpl = _load_template('portal_rate_table.html')
@@ -299,15 +329,15 @@ def build_oracle_portal_rate_table(oracle_rows, start, end):
     period_date_str = f"{start} ~ {end}"
     for row in oracle_rows:
         rate = float(row['CONVERSION_RATE'])
-        inv_rate = round(1 / rate, 6) if rate != 0 else 0
+        inv_rate = round(1 / rate, 4) if rate != 0 else 0
 
         rows_html += row_tmpl.substitute(
             from_currency=row['FROM_CURRENCY'],
             to_currency=row['TO_CURRENCY'],
             conversion_date=period_date_str,
             conversion_type=row['USER_CONVERSION_TYPE'],
-            conversion_rate=f"{rate:.6f}",
-            inverse_conversion_rate=f"{inv_rate:.6f}",
+            conversion_rate=f"{rate:.4f}",
+            inverse_conversion_rate=f"{inv_rate:.4f}",
         )
 
     table_tmpl = _load_template('oracle_portal_rate_table.html')
@@ -351,8 +381,8 @@ def _execute_merge_rate(cursor, from_currency, to_currency, from_date, to_date,
                     batch_number, insert_time)
             VALUES (source.from_currency, source.to_currency,
                     source.from_conversion_date, source.to_conversion_date,
-                    source.user_conversion_type, ?, 'I',
-                    ?, '1175', 'Y',
+                    source.user_conversion_type, ROUND(?,4), 'I',
+                    ROUND(?,4), '1175', 'Y',
                     NULL, GETDATE());
     """
 
@@ -394,13 +424,13 @@ def insert_portal_rates(filtered_items, start, end):
                  user_conversion_type, conversion_rate, mode_flag,
                  inverse_conversion_rate, user_id, launch_rate_change,
                  batch_number, insert_time)
-            VALUES (?, ?, ?, ?, N'SC_三旬匯率', ?, 'I', ?, '1175', 'Y', NULL, GETDATE())
+            VALUES (?, ?, ?, ?, N'SC_三旬匯率', ROUND(?, 4), 'I', ROUND(?, 4), '1175', 'Y', NULL, GETDATE())
         """
 
         insert_count = 0
         for item in filtered_items:
-            base_rate = float(item["buyValue"])
-            inverse_rate = 1 / base_rate
+            base_rate: float = float(f"{float(item['buyValue']):.4f}")
+            inverse_rate: float = float(f"{1 / base_rate:.4f}") if base_rate != 0 else 0.0
 
             cursor.execute(insert_sql, (item["code"], "TWD", start_date, end_date, base_rate, inverse_rate))
             cursor.execute(insert_sql, ("TWD", item["code"], start_date, end_date, inverse_rate, base_rate))
@@ -437,7 +467,7 @@ def insert_portal_rates_oracle(filtered_items, start, end):
         oracle_rows = []
         inserted_data = []
         for item in filtered_items:
-            base_rate = float(item["buyValue"])
+            base_rate: float = float(f"{float(item['buyValue']):.4f}")
 
             oracle_rows.append((
                 'TW_BANK', item["code"], 'TWD', start_dt, end_dt,
@@ -466,7 +496,7 @@ def insert_portal_rates_oracle(filtered_items, start, end):
                 SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
                 CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
                 USER_CONVERSION_TYPE
-            ) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)
+            ) VALUES (:1, :2, :3, :4, :5, ROUND(:6, 4), :7, :8, :9, :10)
         """
 
         cursor.executemany(insert_sql, oracle_rows)
@@ -559,8 +589,8 @@ def _build_excel_sheets(filtered_items, start, end, raw_data):
     # Sheet 2: DWNotes_DAILY_RATES
     dwnotes_rows = []
     for item in filtered_items:
-        base_rate = float(item["buyValue"])
-        inverse_rate = 1 / base_rate if base_rate != 0 else 0
+        base_rate: float = float(f"{float(item['buyValue']):.4f}")
+        inverse_rate: float = float(f"{1 / base_rate:.4f}") if base_rate != 0 else 0.0
         dwnotes_rows.append({
             'from_currency': item["code"], 'to_currency': 'TWD',
             'from_conversion_date': start_dt.date(), 'to_conversion_date': end_dt.date(),
@@ -620,7 +650,8 @@ def main():
         # ===== Step 3: Oracle 寫入 (YSC.SGLP0021_TEMP) =====
         current_step = "Step 3: Oracle 寫入 (YSC.SGLP0021_TEMP)"
         oracle_inserted_data = insert_portal_rates_oracle(filtered_items, start, end)
-        step_results.append(("Step 3: Oracle (YSC.SGLP0021_TEMP)", f"{len(oracle_inserted_data)} 筆三旬匯率寫入成功"))
+        oracle_inserted_len = len(oracle_inserted_data) if oracle_inserted_data is not None else 0
+        step_results.append(("Step 3: Oracle (YSC.SGLP0021_TEMP)", f"{oracle_inserted_len} 筆三旬匯率寫入成功"))
 
         # ===== Step 4: Excel 報表產生 (3 sheets) =====
         current_step = "Step 4: Excel 報表產生"

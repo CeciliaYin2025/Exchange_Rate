@@ -25,6 +25,9 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 
 
 # === Constants ===
@@ -63,10 +66,38 @@ def _get_daily_log_filepath(log_dir, prefix='currency_monthly'):
             return seq_path
         seq += 1
 
+def _cleanup_old_logs(log_dir, days=14):
+    """刪除 log_dir 中超過 days 天的 .log 檔案。"""
+    cutoff = datetime.now().timestamp() - days * 86400
+    for fname in os.listdir(log_dir):
+        if not fname.endswith('.log'):
+            continue
+        fpath = os.path.join(log_dir, fname)
+        if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+
+def _cleanup_old_data(data_dir, days=14):
+    """刪除 data_dir 中超過 days 天的日期子目錄（含其內容）。"""
+    if not os.path.isdir(data_dir):
+        return
+    cutoff = datetime.now().timestamp() - days * 86400
+    for dname in os.listdir(data_dir):
+        dpath = os.path.join(data_dir, dname)
+        if os.path.isdir(dpath) and os.path.getmtime(dpath) < cutoff:
+            try:
+                import shutil
+                shutil.rmtree(dpath)
+            except OSError:
+                pass
+
 def setup_logging(log_dir='./logs'):
     """
     設定日誌系統，將輸出同時寫入控制台和日誌檔案。
     日誌檔名依日期產生，同日重複執行時自動加流水號。
+    啟動時自動清除超過 14 天的舊 log 檔。
     """
     global logger
 
@@ -74,6 +105,8 @@ def setup_logging(log_dir='./logs'):
     logger.setLevel(logging.INFO)
 
     if not logger.handlers:
+        _cleanup_old_logs(log_dir)
+        _cleanup_old_data('./data/web')
         log_filepath = _get_daily_log_filepath(log_dir)
         file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
         file_formatter = logging.Formatter(
@@ -244,7 +277,7 @@ def send_email_notification(subject, body, table_html=None, file_path=None, mail
 
 # === Web Scraping / Screenshots ===
 async def snapshot_page(url, output_path):
-    """擷取網頁：保留 Title 與趨勢圖，移除廣告，避免超時"""
+    """擷取網頁：移除 Title 與趨勢圖，只保留表格"""
     folder = os.path.dirname(output_path)
     os.makedirs(folder, exist_ok=True)
 
@@ -260,13 +293,19 @@ async def snapshot_page(url, output_path):
             except Exception:
                 logger.warning("等待表格超時，嘗試繼續截圖...")
 
+            # 隱藏廣告、標題、趨勢圖，只保留表格
             await page.evaluate("""() => {
-                const ads = [
+                const hideSelectors = [
                     '.advertisement', '.ad-container', 'iframe',
                     '[id*="ad-"]', '.footer-ads', '#gpt-ad',
-                    '.universal-footer', '.sidebar'
+                    '.universal-footer', '.sidebar',
+                    'h1', 'h2', 'h3', '.title', '[class*="title"]', '[class*="Title"]',
+                    'canvas', 'svg', '[class*="chart"]', '[class*="Chart"]',
+                    '[class*="graph"]', '[class*="Graph"]',
+                    '[class*="trend"]', '[class*="Trend"]',
+                    '.highcharts-container', '[id*="chart"]', '[id*="Chart"]'
                 ];
-                ads.forEach(s => {
+                hideSelectors.forEach(s => {
                     document.querySelectorAll(s).forEach(el => el.style.display = 'none');
                 });
                 document.body.style.backgroundColor = 'white';
@@ -274,12 +313,30 @@ async def snapshot_page(url, output_path):
 
             await asyncio.sleep(2)
 
-            await page.screenshot(
-                path=output_path,
-                clip={'x': 0, 'y': 0, 'width': 1200, 'height': 1200}
-            )
+            # 嘗試定位表格元素，只截取表格區域
+            table_box = await page.evaluate("""() => {
+                const table = document.querySelector('table');
+                if (table) {
+                    const rect = table.getBoundingClientRect();
+                    return {
+                        x: Math.max(0, rect.x - 10),
+                        y: Math.max(0, rect.y - 10),
+                        width: Math.min(rect.width + 20, 1280),
+                        height: Math.min(rect.height + 20, 2000)
+                    };
+                }
+                return null;
+            }""")
 
-            logger.info(f"成功擷取去廣告畫面 (含來源標題): {os.path.basename(output_path)}")
+            if table_box:
+                await page.screenshot(path=output_path, clip=table_box)
+            else:
+                await page.screenshot(
+                    path=output_path,
+                    clip={'x': 0, 'y': 0, 'width': 1200, 'height': 1200}
+                )
+
+            logger.info(f"成功擷取表格截圖 (已移除標題與趨勢圖): {os.path.basename(output_path)}")
 
         except Exception as e:
             logger.error(f"截圖出錯: {e}")
@@ -297,7 +354,7 @@ def get_latest_usdtwd_rate_from_cbc():
             soup = BeautifulSoup(response.text, 'html.parser')
             table = soup.find('table')
             if not table:
-                return None
+                return None, None
 
             possible_dates = [(date.today() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(0, 15)]
 
@@ -314,12 +371,12 @@ def get_latest_usdtwd_rate_from_cbc():
                     try:
                         rate_val = float(col_texts[1])
                         logger.info(f"成功取得 CBC USD 匯率: {rate_val} (日期: {row_date})")
-                        return rate_val
+                        return rate_val, row_date
                     except ValueError:
                         continue
     except Exception as e:
         logger.error(f"CBC fetch error: {e}")
-    return None
+    return None, None
 
 async def fetch_currency_rate_selenium(driver, target_date_obj, currency_pair):
     url = f"https://invest.cnyes.com/forex/detail/{currency_pair}/history#fixed"
@@ -327,12 +384,14 @@ async def fetch_currency_rate_selenium(driver, target_date_obj, currency_pair):
     target_date_dash = target_date_obj.strftime('%Y-%m-%d')
 
     snapshot_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
-    snapshot_path = f"{snapshot_dir}/{currency_pair}_snapshot.jpg"
-    await snapshot_page(url, output_path=snapshot_path)
+    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_path = f"{snapshot_dir}/{currency_pair}_snapshot.png"
 
     try:
         driver.get(url)
-        time.sleep(5)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "table tr td"))
+        )
         rows = driver.find_elements(By.CSS_SELECTOR, 'table tr')
         for row in rows:
             cols = row.find_elements(By.TAG_NAME, 'td')
@@ -343,6 +402,41 @@ async def fetch_currency_rate_selenium(driver, target_date_obj, currency_pair):
             date_str = col_texts[0].replace('-', '/')
             if date_str == target_date_slash or date_str == target_date_dash:
                 rate = float(col_texts[4].replace(',', ''))
+
+                # 在同一個 Selenium session 截圖，確保截圖與匯率數值一致
+                try:
+                    # 找到表格元素並滾動到可見位置
+                    table_el = driver.find_element(By.CSS_SELECTOR, 'table')
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'start'});", table_el
+                    )
+                    time.sleep(1)
+
+                    # 隱藏廣告、導覽列、圖表等非表格元素
+                    driver.execute_script("""
+                        const hideSelectors = [
+                            '.advertisement', '.ad-container', 'iframe',
+                            '[id*="ad-"]', '.footer-ads', '#gpt-ad',
+                            '.universal-footer', '.sidebar',
+                            'nav', 'header', 'footer',
+                            'canvas', 'svg',
+                            '[class*="chart"]', '[class*="Chart"]',
+                            '[class*="graph"]', '[class*="Graph"]',
+                            '[class*="trend"]', '[class*="Trend"]',
+                            '.highcharts-container', '[id*="chart"]', '[id*="Chart"]'
+                        ];
+                        hideSelectors.forEach(s => {
+                            document.querySelectorAll(s).forEach(el => el.style.display = 'none');
+                        });
+                        document.body.style.backgroundColor = 'white';
+                    """)
+
+                    # 直接截取表格元素，只保留歷史價格表格
+                    table_el.screenshot(snapshot_path)
+                    logger.info(f"截圖儲存（歷史價格表格）：{snapshot_path}，匯率：{rate}")
+                except Exception as e:
+                    logger.warning(f"截圖失敗 ({currency_pair}): {e}")
+
                 return rate
         return None
     except Exception as e:
@@ -604,13 +698,73 @@ def query_oracle_bank_rates():
         if connection:
             connection.close()
 
+def fetch_holiday_rates_from_oracle(row_date):
+    """
+    假日模式：從 Oracle APPS.GL_DAILY_RATES_V 查詢前一個交易日 (row_date) 寫入的
+    SC_銀行匯率，回傳 {'INR': rate, 'MXN': rate, 'TRY': rate}。
+    不假設 CONVERSION_DATE = row_date + 1，改為搜尋 [row_date+1, 今天+1] 區間
+    內最新一筆，以應對長假（多天假期）的情況。
+    """
+    connection = None
+    try:
+        connection = connect_to_db_oracle()
+        if connection is None:
+            logger.error("假日模式：無法連線 Oracle，無法取得匯率。")
+            return None
+
+        row_date_obj = datetime.strptime(row_date, '%Y-%m-%d')
+        # Lower bound: the day after the last trading day
+        from_date = row_date_obj + timedelta(days=1)
+        # Upper bound: tomorrow (the target effective date for today's rates)
+        to_date = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+
+        cursor = connection.cursor()
+        sql = """
+            SELECT FROM_CURRENCY, CONVERSION_RATE
+            FROM (
+                SELECT FROM_CURRENCY, CONVERSION_RATE,
+                       ROW_NUMBER() OVER (PARTITION BY FROM_CURRENCY ORDER BY CONVERSION_DATE DESC) AS rn
+                FROM APPS.GL_DAILY_RATES_V
+                WHERE TRUNC(CONVERSION_DATE) >= TRUNC(:from_date)
+                  AND TRUNC(CONVERSION_DATE) <= TRUNC(:to_date)
+                  AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
+                  AND FROM_CURRENCY IN ('INR', 'MXN', 'TRY')
+                  AND TO_CURRENCY = 'TWD'
+            )
+            WHERE rn = 1
+        """
+        cursor.execute(sql, {'from_date': from_date, 'to_date': to_date})
+        rows = cursor.fetchall()
+        cursor.close()
+
+        result = {}
+        for from_cur, conv_rate in rows:
+            result[from_cur] = float(conv_rate)
+
+        if not result:
+            logger.warning(
+                f"假日模式：Oracle 查無 [{from_date.strftime('%Y-%m-%d')} ~ "
+                f"{to_date.strftime('%Y-%m-%d')}] 的匯率資料。"
+            )
+            return None
+
+        logger.info(f"假日模式：從 Oracle 取得匯率 - {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"假日模式：Oracle 查詢失敗: {e}")
+        return None
+    finally:
+        if connection:
+            connection.close()
+
 def build_oracle_rate_table(oracle_rows):
     """使用 Oracle 查詢結果建構 SC_銀行匯率 HTML 表格（匹配 Excel 格式）。"""
     row_tmpl = _load_template('oracle_rate_row.html')
     rows_html = ""
     for row in oracle_rows:
         rate = float(row['CONVERSION_RATE'])
-        inv_rate = round(1 / rate, 6) if rate != 0 else 0
+        inv_rate = round(1 / rate, 4) if rate != 0 else 0
         conv_date = row.get('CONVERSION_DATE') or row.get('FROM_DATE')
         if isinstance(conv_date, datetime):
             conv_date_str = conv_date.strftime('%m-%d-%y')
@@ -622,8 +776,8 @@ def build_oracle_rate_table(oracle_rows):
             to_currency=row['TO_CURRENCY'],
             conversion_date=conv_date_str,
             conversion_type=row['USER_CONVERSION_TYPE'],
-            conversion_rate=f"{rate:.6f}",
-            inverse_conversion_rate=f"{inv_rate:.6f}",
+            conversion_rate=f"{rate:.4f}",
+            inverse_conversion_rate=f"{inv_rate:.4f}",
         )
 
     table_tmpl = _load_template('oracle_rate_table.html')
@@ -717,9 +871,9 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
         # Embed screenshot images into Sheet 3
         _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
         screenshot_info = [
-            ('USDINR_snapshot.jpg', 'INR (USD/INR)'),
-            ('USDMXN_snapshot.jpg', 'MXN (USD/MXN)'),
-            ('TRYTWD_snapshot.jpg', 'TRY (TRY/TWD)'),
+            ('USDINR_snapshot.png', 'INR (USD/INR)'),
+            ('USDMXN_snapshot.png', 'MXN (USD/MXN)'),
+            ('TRYTWD_snapshot.png', 'TRY (TRY/TWD)'),
         ]
 
         import openpyxl
@@ -763,9 +917,9 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
         )
 
         snapshot_paths = {
-            'inr_img': f"{_snap_dir}/USDINR_snapshot.jpg",
-            'mxn_img': f"{_snap_dir}/USDMXN_snapshot.jpg",
-            'try_img': f"{_snap_dir}/TRYTWD_snapshot.jpg"
+            'inr_img': f"{_snap_dir}/USDINR_snapshot.png",
+            'mxn_img': f"{_snap_dir}/USDMXN_snapshot.png",
+            'try_img': f"{_snap_dir}/TRYTWD_snapshot.png"
         }
 
         body_text = f"""
@@ -826,39 +980,71 @@ async def _async_run():
         'error': None,
     }
 
-    options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-
     try:
         # ===== Step 1: CBC USD/TWD 匯率抓取 =====
         current_step = "Step 1: CBC USD/TWD 匯率抓取"
-        usd_rate = get_latest_usdtwd_rate_from_cbc()
+        usd_rate, row_date = get_latest_usdtwd_rate_from_cbc()
         if usd_rate is None:
             raise RuntimeError("無法從 CBC 取得 USD/TWD 匯率。")
-        step_results.append(("Step 1: CBC USD/TWD", f"USD/TWD = {usd_rate}"))
+        step_results.append(("Step 1: CBC USD/TWD", f"USD/TWD = {usd_rate} (日期: {row_date})"))
 
-        # ===== Step 2: MXN/INR/TRY 匯率抓取 (Selenium) =====
-        current_step = "Step 2: MXN/INR/TRY 匯率抓取"
-        mxn_rate = await fetch_rate_with_fallback(driver, "MXN", "USDMXN")
-        inr_rate = await fetch_rate_with_fallback(driver, "INR", "USDINR")
-        try_rate = await fetch_rate_with_fallback(driver, "TRY", "TRYTWD")
+        # 檢查 row_date 是否與系統日期一致，不一致表示今天為假日
+        system_date = date.today().strftime('%Y-%m-%d')
+        is_holiday = (row_date != system_date)
 
-        if not all(r is not None for r in [mxn_rate, inr_rate, try_rate]):
-            missing = [k for k, v in {"MXN": mxn_rate, "INR": inr_rate, "TRY": try_rate}.items() if v is None]
-            raise RuntimeError(f"匯率資料不齊全 (缺失: {missing})")
+        if is_holiday:
+            logger.warning(f"CBC 匯率日期 ({row_date}) 與系統日期 ({system_date}) 不一致，今天為假日。")
 
-        step_results.append(("Step 2: Selenium 抓取", f"MXN={mxn_rate}, INR={inr_rate}, TRY={try_rate}"))
+            # ===== Step 2B: 假日模式 — 從 Oracle 取得前一交易日匯率 =====
+            current_step = "Step 2B: 假日模式 Oracle 匯率查詢"
+            holiday_rates = fetch_holiday_rates_from_oracle(row_date)
+            if not holiday_rates or not all(c in holiday_rates for c in ['INR', 'MXN', 'TRY']):
+                missing = [c for c in ['INR', 'MXN', 'TRY'] if c not in (holiday_rates or {})]
+                raise RuntimeError(f"假日模式：Oracle 匯率資料不齊全 (缺失: {missing})")
 
-        all_rates = {
-            'INR': (usd_rate, inr_rate),
-            'MXN': (usd_rate, mxn_rate),
-            'TRY': (try_rate, 1)  # TRYTWD 已是 TRY→TWD，直接使用
-        }
+            mxn_rate = usd_rate / holiday_rates['MXN']
+            inr_rate = usd_rate / holiday_rates['INR']
+
+            step_results.append(("Step 2B: 假日 Oracle 匯率",
+                                  f"INR={inr_rate:.4f}, MXN={mxn_rate:.4f}, TRY={holiday_rates['TRY']:.4f}"))
+
+            # 假日模式：INR/MXN 為 USD/XXX 格式，需搭配 usd_rate 換算為 TWD/XXX
+            # TRY 為 TRYTWD 直接匯率，用 (rate, 1)
+            all_rates = {
+                'INR': (usd_rate, holiday_rates['INR']),
+                'MXN': (usd_rate, holiday_rates['MXN']),
+                'TRY': (holiday_rates['TRY'], 1),
+            }
+
+            # snapshot 指向前一個交易日的目錄
+            row_date_yymmdd = datetime.strptime(row_date, '%Y-%m-%d').strftime('%y%m%d')
+            _snap_dir_holiday = f"./data/web/{row_date_yymmdd}"
+
+        else:
+            # ===== Step 2: MXN/INR/TRY 匯率抓取 (Selenium) =====
+            current_step = "Step 2: MXN/INR/TRY 匯率抓取"
+            options = webdriver.ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            mxn_rate = await fetch_rate_with_fallback(driver, "MXN", "USDMXN")
+            inr_rate = await fetch_rate_with_fallback(driver, "INR", "USDINR")
+            try_rate = await fetch_rate_with_fallback(driver, "TRY", "TRYTWD")
+
+            if not all(r is not None for r in [mxn_rate, inr_rate, try_rate]):
+                missing = [k for k, v in {"MXN": mxn_rate, "INR": inr_rate, "TRY": try_rate}.items() if v is None]
+                raise RuntimeError(f"匯率資料不齊全 (缺失: {missing})")
+
+            step_results.append(("Step 2: Selenium 抓取", f"MXN={mxn_rate}, INR={inr_rate}, TRY={try_rate}"))
+
+            all_rates = {
+                'INR': (usd_rate, inr_rate),
+                'MXN': (usd_rate, mxn_rate),
+                'TRY': (try_rate, 1)  # TRYTWD 已是 TRY→TWD，直接使用
+            }
 
         # ===== Step 3: SQL Server 寫入 =====
         current_step = "Step 3: SQL Server 寫入"
@@ -879,17 +1065,22 @@ async def _async_run():
         excel_file_path = _export_web_excel(rows, oracle_inserted_data)
         step_results.append(("Step 5: 產生報表", "Excel 產生完成"))
 
-        _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
+        if is_holiday:
+            _snap_dir = _snap_dir_holiday
+        else:
+            _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
+
         result_data.update({
             'success': True,
             'rows': rows,
             'oracle_inserted_data': oracle_inserted_data,
             'snapshot_paths': {
-                'inr_img': f"{_snap_dir}/USDINR_snapshot.jpg",
-                'mxn_img': f"{_snap_dir}/USDMXN_snapshot.jpg",
-                'try_img': f"{_snap_dir}/TRYTWD_snapshot.jpg",
+                'inr_img': f"{_snap_dir}/USDINR_snapshot.png",
+                'mxn_img': f"{_snap_dir}/USDMXN_snapshot.png",
+                'try_img': f"{_snap_dir}/TRYTWD_snapshot.png",
             },
             'excel_file_path': excel_file_path,
+            'is_holiday': is_holiday,
         })
 
     except Exception as e:
@@ -897,7 +1088,8 @@ async def _async_run():
         step_results.append((current_step, f"失敗 - {e}"))
         result_data['error'] = str(e)
     finally:
-        driver.quit()
+        if 'driver' in dir() and driver:
+            driver.quit()
         logger.info(f"執行完畢，耗時: {time.time() - start_time:.2f} 秒")
 
     logger.info("--- Monthly Rate Process Finished ---")
@@ -980,9 +1172,9 @@ def _export_web_excel(rows_data, oracle_inserted_data):
         # Embed screenshot images into Sheet 3
         _snap_dir = f"./data/web/{datetime.now().strftime('%y%m%d')}"
         screenshot_info = [
-            ('USDINR_snapshot.jpg', 'INR (USD/INR)'),
-            ('USDMXN_snapshot.jpg', 'MXN (USD/MXN)'),
-            ('TRYTWD_snapshot.jpg', 'TRY (TRY/TWD)'),
+            ('USDINR_snapshot.png', 'INR (USD/INR)'),
+            ('USDMXN_snapshot.png', 'MXN (USD/MXN)'),
+            ('TRYTWD_snapshot.png', 'TRY (TRY/TWD)'),
         ]
 
         import openpyxl

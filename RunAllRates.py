@@ -141,8 +141,8 @@ def _build_combined_rate_table(oracle_rows):
             to_currency=row['TO_CURRENCY'],
             conversion_date=conv_date_str,
             conversion_type=row['USER_CONVERSION_TYPE'],
-            conversion_rate=f"{rate:.6f}",
-            inverse_conversion_rate=f"{inv_rate:.6f}",
+            conversion_rate=f"{rate:.4f}",
+            inverse_conversion_rate=f"{inv_rate:.4f}",
         )
 
     return f"""

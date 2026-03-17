@@ -67,10 +67,38 @@ def _get_daily_log_filepath(log_dir, prefix='currency_daily'):
             return seq_path
         seq += 1
 
+def _cleanup_old_logs(log_dir, days=14):
+    """刪除 log_dir 中超過 days 天的 .log 檔案。"""
+    cutoff = datetime.now().timestamp() - days * 86400
+    for fname in os.listdir(log_dir):
+        if not fname.endswith('.log'):
+            continue
+        fpath = os.path.join(log_dir, fname)
+        if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+
+def _cleanup_old_data(data_dir, days=14):
+    """刪除 data_dir 中超過 days 天的日期子目錄（含其內容）。"""
+    if not os.path.isdir(data_dir):
+        return
+    cutoff = datetime.now().timestamp() - days * 86400
+    for dname in os.listdir(data_dir):
+        dpath = os.path.join(data_dir, dname)
+        if os.path.isdir(dpath) and os.path.getmtime(dpath) < cutoff:
+            try:
+                import shutil
+                shutil.rmtree(dpath)
+            except OSError:
+                pass
+
 def setup_logging(log_dir='./logs'):
     """
     設定日誌系統，將輸出同時寫入控制台和日誌檔案。
     日誌檔名依日期產生，同日重複執行時自動加流水號。
+    啟動時自動清除超過 14 天的舊 log 檔。
     """
     global logger
 
@@ -78,6 +106,8 @@ def setup_logging(log_dir='./logs'):
     logger.setLevel(logging.INFO)
 
     if not logger.handlers:
+        _cleanup_old_logs(log_dir)
+        _cleanup_old_data('./data/daily')
         log_filepath = _get_daily_log_filepath(log_dir)
         file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
         file_formatter = logging.Formatter(
@@ -473,7 +503,7 @@ def build_rate_table(rates, rates_with_usd, conversion_date):
             from_currency=cur, to_currency='TWD',
             conversion_date=conversion_date,
             conversion_rate=f"{rate:.4f}",
-            inverse_conversion_rate=f"{rev_rate:.6f}",
+            inverse_conversion_rate=f"{rev_rate:.4f}",
         )
 
     usd_rows = ""
@@ -483,7 +513,7 @@ def build_rate_table(rates, rates_with_usd, conversion_date):
             from_currency='USD', to_currency=cur,
             conversion_date=conversion_date,
             conversion_rate=f"{usd_rate:.4f}",
-            inverse_conversion_rate=f"{rev_rate:.6f}",
+            inverse_conversion_rate=f"{rev_rate:.4f}",
         )
 
     table_tmpl = _load_template('rate_table.html')
@@ -544,8 +574,8 @@ def build_oracle_rate_table(oracle_rows):
             to_currency=row['TO_CURRENCY'],
             conversion_date=conv_date_str,
             conversion_type=row['USER_CONVERSION_TYPE'],
-            conversion_rate=f"{rate:.6f}",
-            inverse_conversion_rate=f"{inv_rate:.6f}",
+            conversion_rate=f"{rate:.4f}",
+            inverse_conversion_rate=f"{inv_rate:.4f}",
         )
 
     table_tmpl = _load_template('oracle_rate_table.html')
