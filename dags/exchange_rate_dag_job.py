@@ -5,13 +5,13 @@ from airflow.providers.ssh.operators.ssh import SSHOperator
 
 LOCAL_TZ = pendulum.timezone('Asia/Taipei')
 
-PROJECT_DIR = '/home/robert/Projects/Exchange_Rate-main'
+PROJECT_DIR = '/Projects/Exchange_Rate'
 SSH_CONN_ID = 'Exchange_Rate_Server'
 
 default_args = {
     'owner': 'airflow',
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retries': 0,
+    'retry_delay': timedelta(minutes=15),
 }
 
 with DAG(
@@ -30,6 +30,8 @@ with DAG(
         command=f'cd {PROJECT_DIR} && docker compose run --rm exchange-rate bank',
         cmd_timeout=600,
         conn_timeout=30,
+        retries=1,
+        retry_delay=timedelta(minutes=5),
     )
 
     run_portal = SSHOperator(
@@ -40,5 +42,5 @@ with DAG(
         conn_timeout=30,
     )
 
-    # 銀行匯率與三旬匯率平行執行
-    [run_bank, run_portal]
+    # 循序執行：銀行匯率完成後再執行三旬匯率，避免 sglp0021_pkg.main 同時執行衝突
+    run_bank >> run_portal

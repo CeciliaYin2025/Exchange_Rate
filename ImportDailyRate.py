@@ -396,53 +396,56 @@ def get_daily_rate_from_tcb():
     target_date, usd_rate = cbc_result
 
     target_date = re.sub(r"[/]", "-", target_date.strip())
-    url = f"https://rate.bot.com.tw/xrt/all/{target_date}"
-    response = requests.get(url, timeout=10)
+    csv_url = f"https://rate.bot.com.tw/xrt/flcsv/0/{target_date}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': f'https://rate.bot.com.tw/xrt/all/{target_date}',
+        'Accept': 'text/csv,*/*',
+    }
+    response = requests.get(csv_url, headers=headers, timeout=10)
 
     if response.status_code != 200:
         logger.error(f"get_daily_rate_from_tcb(): Failed to fetch daily rates from TCB. Status code: {response.status_code}")
         return None
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    table = soup.find('table')
-    if not table:
-        logger.error("get_daily_rate_from_tcb(): Failed to find the rate table on the TCB page.")
+    lines = response.content.decode('utf-8-sig', errors='ignore').splitlines()
+    if len(lines) < 2 or not re.match(r'^[A-Z]{3},', lines[1]):
+        logger.error(f"get_daily_rate_from_tcb(): Response does not look like TCB CSV (first data line: {lines[1][:80] if len(lines) > 1 else 'empty'})")
         return None
 
-    snapshot_page(url, output_path=TCB_SNAPSHOT_PATH)
+    snapshot_page(f"https://rate.bot.com.tw/xrt/all/{target_date}", output_path=TCB_SNAPSHOT_PATH)
 
     rates = {}
 
-    for row in table.find_all("tr"):
-        cols = [c.text.strip() for c in row.find_all("td")]
-        if len(cols) < 5:
-            continue
 
-        match = re.search(r'\((\w+)\)', cols[0])
-        if not match:
+    for line in lines[1:]:  # Skip header row
+        cols = line.split(',')
+        if len(cols) < 14:
             continue
-        currency = match.group(1)
-
+        currency = cols[0].strip()
         if currency not in TWD_CURRENCIES:
             continue
+
         if currency == 'PHP':
-            cash_sell_val = cols[2].strip()
+            # PHP has no spot rate; use cash sell (col 12)
+            cash_sell_val = cols[12].strip()
             if cash_sell_val:
                 try:
-                    php_rate = float(cash_sell_val.replace(',', ''))
+                    php_rate = float(cash_sell_val)
                     rates[currency] = php_rate
                     log_and_collect(f"get_daily_rate_from_tcb(): {currency}: cash_sell={php_rate}")
                 except ValueError:
                     logger.error(f"get_daily_rate_from_tcb(): Error parsing cash sell value for {currency}")
-                    continue
             continue
+
+        # col[3] = spot buy, col[13] = spot sell
         buy_val = cols[3].strip()
-        sell_val = cols[4].strip()
+        sell_val = cols[13].strip()
 
         if buy_val and sell_val:
             try:
-                spot_buy = float(buy_val.replace(',', ''))
-                spot_sell = float(sell_val.replace(',', ''))
+                spot_buy = float(buy_val)
+                spot_sell = float(sell_val)
                 avg_rate = round((spot_buy + spot_sell) / 2, 4)
                 rates[currency] = avg_rate
                 log_and_collect(f"get_daily_rate_from_tcb(): {currency}: buy={spot_buy}, sell={spot_sell}, avg={avg_rate}")

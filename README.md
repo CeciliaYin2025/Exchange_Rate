@@ -126,12 +126,14 @@ Docker 容器基於 `mcr.microsoft.com/playwright/python:v1.50.0-noble`，已包
 
 DAG 檔案位於 `dags/exchange_rate_dag_job.py`，每天 17:30 (Asia/Taipei) 執行：
 
-| Task | 命令 | 說明 |
-|------|------|------|
-| `import_bank_rate` | `docker compose run --rm exchange-rate bank` | RunAllRates.py (每日銀行匯率) |
-| `import_portal_rate` | `docker compose run --rm exchange-rate portal` | ImportPortalRate.py (三旬匯率) |
+| Task | 命令 | 說明 | 重試設定 |
+|------|------|------|----------|
+| `import_bank_rate` | `docker compose run --rm exchange-rate bank` | RunAllRates.py (每日銀行匯率) | 失敗後 15 分鐘重試一次 |
+| `import_portal_rate` | `docker compose run --rm exchange-rate portal` | ImportPortalRate.py (三旬匯率) | 不重試 |
 
-兩個 task 平行執行。
+兩個 task 平行執行。`import_bank_rate` 設有自動重試，因 MXN / INR 來源網站偶有抓取失敗的情況。
+
+**重試觸發條件：** `RunAllRates.py` 或 `ImportWebRate.py` 執行失敗時會以 exit code 1 結束，Docker container 將非零 exit code 回傳給 Airflow，觸發自動重試。
 
 ## 專案結構
 

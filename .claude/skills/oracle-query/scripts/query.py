@@ -6,15 +6,17 @@ import yaml
 
 def connect():
     with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)['oracle_db_insert']
+        config = yaml.safe_load(f)
+    env = config.get('oracle_active_env', 'uat')
+    db = config[f'oracle_query_{env}']
     try:
-        oracledb.init_oracle_client(lib_dir=config.get('client_lib_dir'))
+        oracledb.init_oracle_client(lib_dir=db.get('client_lib_dir'))
     except oracledb.ProgrammingError:
         pass
     return oracledb.connect(
-        user=config['user'],
-        password=config['password'],
-        dsn=f"{config['host']}:{config['port']}/{config['service_name']}"
+        user=db['user'],
+        password=db['password'],
+        dsn=f"{db['host']}:{db['port']}/{db['service_name']}"
     )
 
 

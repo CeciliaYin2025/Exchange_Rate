@@ -148,10 +148,16 @@ def load_db_config(file_path):
         available_keys = list(config.keys()) if config else "Empty File"
         raise KeyError(f"設定檔中找不到 'dev_db' 或 'database'。目前擁有的標籤為: {available_keys}")
 
-def load_oracle_config(file_path):
+def load_oracle_config(file_path, role='insert'):
+    """讀取 Oracle 連線設定。role='insert'(servicegate) 或 'query'(ypr)。
+    環境由 oracle_active_env 決定：uat | test2 | prod。"""
     with open(file_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    return config['oracle_db_insert']
+    env = config.get('oracle_active_env', 'uat')
+    key = f'oracle_{role}_{env}'
+    if key not in config:
+        raise KeyError(f"Oracle config key '{key}' not found (oracle_active_env={env})")
+    return config[key]
 
 def load_email_config(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -200,8 +206,36 @@ def connect_to_db_oracle():
         logger.error("Oracle connection error: %s", e)
         return None
 
+def _get_oracle_insert_connections():
+    """依 oracle_insert_targets 建立並回傳所有寫入目標的連線清單 [(connection, env_label)]。"""
+    with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    targets = config.get('oracle_insert_targets', [config.get('oracle_active_env', 'uat')])
+    client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR')
+    connections = []
+    for env in targets:
+        db_config = config.get(f'oracle_insert_{env}')
+        if db_config is None:
+            logger.warning(f"Oracle insert config for env '{env}' not found, skipping")
+            continue
+        lib_dir = client_lib_dir or db_config.get('client_lib_dir')
+        try:
+            oracledb.init_oracle_client(lib_dir=lib_dir)
+        except oracledb.ProgrammingError:
+            pass
+        conn = oracledb.connect(
+            user=db_config['user'],
+            password=db_config['password'],
+            dsn=f"{db_config['host']}:{db_config['port']}/{db_config['service_name']}"
+        )
+        connections.append((conn, env.upper()))
+    return connections
+
 # === Email ===
 def send_email_notification(subject, body, table_html=None, file_path=None, mailtype=None, snapshot_paths=None):
+    if os.environ.get('SKIP_EMAIL'):
+        logger.info(f"SKIP_EMAIL 設定，略過 Email 發送（subject: {subject}）")
+        return True
     email_config = load_email_config('config/email_config.yaml')
     sender_email = email_config['sender_email']
     password = email_config['password']
@@ -440,14 +474,22 @@ async def fetch_currency_rate_selenium(driver, target_date_obj, currency_pair):
                 return rate
         return None
     except Exception as e:
+        err_str = str(e)
+        if 'HTTPConnectionPool' in err_str:
+            # chromedriver 失聯（非網頁問題），re-raise 讓上層立即停止重試
+            raise
         logger.error(f"Selenium 抓取 {currency_pair} 失敗: {e}")
         return None
 
 async def fetch_rate_with_fallback(driver, currency_name, currency_pair):
-    """共用 driver 的回溯工具，最多回溯 14 天。"""
+    """共用 driver 的回溯工具，最多回溯 14 天。chromedriver 失聯時立即中止。"""
     for i in range(0, 15):
         target_date = (date.today() - timedelta(days=i))
-        rate = await fetch_currency_rate_selenium(driver, target_date, currency_pair)
+        try:
+            rate = await fetch_currency_rate_selenium(driver, target_date, currency_pair)
+        except Exception:
+            logger.error(f"chromedriver 失聯，{currency_name} 抓取中止，不再重試")
+            raise
         if rate:
             logger.info(f"成功取得 {currency_name} 匯率: {rate} (日期: {target_date})")
             return rate
@@ -554,94 +596,92 @@ def prepare_and_merge_sql_server(all_currency_rates, target_date):
 
 def insert_to_oracle(rows_data):
     """
-    將資料寫入 Oracle Table: YSC.SGLP0021_TEMP
+    將資料寫入所有 oracle_insert_targets 的 YSC.SGLP0021_TEMP。
     回傳本次寫入的資料 list[dict]，供 Email 通知使用。
     """
-    connection = None
-    try:
-        connection = connect_to_db_oracle()
-        if connection is None:
-            raise ConnectionError("Oracle 連線失敗。")
+    # 組裝資料（與目標環境無關，只需計算一次）
+    oracle_rows = []
+    inserted_data = []
+    now = datetime.now()
+    rate_dates = list({r['rate_date'] for r in rows_data})
 
-        oracle_rows = []
-        inserted_data = []
-        now = datetime.now()
+    for r in rows_data:
+        if r['from_cur'] == 'TWD':
+            continue
+        rate_date = datetime.strptime(r['rate_date'], '%Y-%m-%d')
+        oracle_rows.append((
+            'TW_BANK', r['from_cur'], r['to_cur'], rate_date, rate_date,
+            r['v_rate'], 'I', now, 'N', 'SC_銀行匯率'
+        ))
+        inserted_data.append({
+            'FROM_CURRENCY': r['from_cur'],
+            'TO_CURRENCY': r['to_cur'],
+            'FROM_DATE': rate_date,
+            'USER_CONVERSION_TYPE': 'SC_銀行匯率',
+            'CONVERSION_RATE': r['v_rate'],
+        })
 
-        # 只寫入正向匯率（XXX→TWD），不寫入反向（TWD→XXX）
-        for r in rows_data:
-            if r['from_cur'] == 'TWD':
-                continue
-            rate_date = datetime.strptime(r['rate_date'], '%Y-%m-%d')
-            oracle_rows.append((
-                'TW_BANK', r['from_cur'], r['to_cur'], rate_date, rate_date,
-                r['v_rate'], 'I', now, 'N', 'SC_銀行匯率'
-            ))
-            inserted_data.append({
-                'FROM_CURRENCY': r['from_cur'],
-                'TO_CURRENCY': r['to_cur'],
-                'FROM_DATE': rate_date,
-                'USER_CONVERSION_TYPE': 'SC_銀行匯率',
-                'CONVERSION_RATE': r['v_rate'],
-            })
+    insert_sql = """
+        INSERT INTO YSC.SGLP0021_TEMP (
+            SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
+            CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
+            USER_CONVERSION_TYPE
+        ) VALUES (:1, :2, :3, :4, :5, ROUND(:6, 4), :7, :8, :9, :10)
+    """
+    delete_sql = """
+        DELETE FROM YSC.SGLP0021_TEMP
+        WHERE TRUNC(FROM_DATE) = TRUNC(:1)
+          AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
+          AND (FROM_CURRENCY IN ('INR', 'MXN', 'TRY') OR TO_CURRENCY IN ('INR', 'MXN', 'TRY'))
+    """
 
-        # 先刪除同日的 SC_銀行匯率 (INR/MXN/TRY) 資料，避免重複
-        rate_dates = list({r['rate_date'] for r in rows_data})
-        cursor = connection.cursor()
-        for rd in rate_dates:
-            rate_dt = datetime.strptime(rd, '%Y-%m-%d')
-            delete_sql = """
-                DELETE FROM YSC.SGLP0021_TEMP
-                WHERE TRUNC(FROM_DATE) = TRUNC(:1)
-                  AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
-                  AND (FROM_CURRENCY IN ('INR', 'MXN', 'TRY') OR TO_CURRENCY IN ('INR', 'MXN', 'TRY'))
-            """
-            cursor.execute(delete_sql, [rate_dt])
-            deleted_count = cursor.rowcount
-            logger.info(f"已刪除 Oracle 同日 SC_銀行匯率 (INR/MXN/TRY) {deleted_count} 筆 ({rd})")
+    connections = _get_oracle_insert_connections()
+    if not connections:
+        raise ConnectionError("Oracle 無可用的 insert 目標環境")
 
-        insert_sql = """
-            INSERT INTO YSC.SGLP0021_TEMP (
-                SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
-                CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
-                USER_CONVERSION_TYPE
-            ) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)
-        """
+    errors = []
+    for connection, env_label in connections:
+        try:
+            cursor = connection.cursor()
+            for rd in rate_dates:
+                rate_dt = datetime.strptime(rd, '%Y-%m-%d')
+                cursor.execute(delete_sql, [rate_dt])
+                logger.info(f"[{env_label}] 已刪除 Oracle 同日 SC_銀行匯率 (INR/MXN/TRY) {cursor.rowcount} 筆 ({rd})")
 
-        cursor.executemany(insert_sql, oracle_rows)
-        connection.commit()
-        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
+            cursor.executemany(insert_sql, oracle_rows)
+            connection.commit()
+            logger.info(f"[{env_label}] 成功寫入 Oracle (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
 
-        # 執行 sglp0021_pkg.main 將 TEMP 資料轉入正式表
-        logger.info("開始執行 sglp0021_pkg.main ...")
-        cursor2 = connection.cursor()
-        l_errbuf = cursor2.var(oracledb.STRING, 2000)
-        l_retcode = cursor2.var(oracledb.STRING, 10)
-        cursor2.execute("""
-            BEGIN
-                APPS.sglp0021_pkg.main(:errbuf, :retcode);
-            END;
-        """, {'errbuf': l_errbuf, 'retcode': l_retcode})
-        connection.commit()
-        errbuf_val = l_errbuf.getvalue()
-        retcode_val = l_retcode.getvalue()
-        cursor2.close()
-        logger.info(f"sglp0021_pkg.main 執行完成。retcode={retcode_val}, errbuf={errbuf_val}")
+            logger.info(f"[{env_label}] 開始執行 sglp0021_pkg.main ...")
+            cursor2 = connection.cursor()
+            l_errbuf = cursor2.var(oracledb.STRING, 2000)
+            l_retcode = cursor2.var(oracledb.STRING, 10)
+            cursor2.execute("""
+                BEGIN
+                    APPS.sglp0021_pkg.main(:errbuf, :retcode);
+                END;
+            """, {'errbuf': l_errbuf, 'retcode': l_retcode})
+            connection.commit()
+            errbuf_val = l_errbuf.getvalue()
+            retcode_val = l_retcode.getvalue()
+            cursor2.close()
+            logger.info(f"[{env_label}] sglp0021_pkg.main 完成。retcode={retcode_val}, errbuf={errbuf_val}")
 
-        if str(retcode_val) != '0':
-            raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
+            if str(retcode_val) != '0':
+                raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
 
-        cursor.close()
-
-        return inserted_data
-
-    except Exception as e:
-        logger.error(f"Oracle 寫入失敗: {e}")
-        if connection:
+            cursor.close()
+        except Exception as e:
+            logger.error(f"[{env_label}] Oracle 寫入失敗: {e}")
             connection.rollback()
-        raise
-    finally:
-        if connection:
+            errors.append(f"[{env_label}] {e}")
+        finally:
             connection.close()
+
+    if errors:
+        raise RuntimeError(f"Oracle 寫入失敗: {'; '.join(errors)}")
+
+    return inserted_data
 
 # === Report & Email ===
 def build_monthly_rate_table(rows_data, conversion_date):
@@ -930,7 +970,7 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
         """
 
         send_email_notification(
-            subject=f"(測試信)【匯率報告】月匯率執行結果 - {date.today() + timedelta(days=1)}",
+            subject=f"【匯率報告】月匯率執行結果 - {date.today() + timedelta(days=1)}",
             body=body_text,
             file_path=excel_file_path,
             snapshot_paths=snapshot_paths,
@@ -1002,17 +1042,13 @@ async def _async_run():
                 missing = [c for c in ['INR', 'MXN', 'TRY'] if c not in (holiday_rates or {})]
                 raise RuntimeError(f"假日模式：Oracle 匯率資料不齊全 (缺失: {missing})")
 
-            mxn_rate = usd_rate / holiday_rates['MXN']
-            inr_rate = usd_rate / holiday_rates['INR']
-
             step_results.append(("Step 2B: 假日 Oracle 匯率",
-                                  f"INR={inr_rate:.4f}, MXN={mxn_rate:.4f}, TRY={holiday_rates['TRY']:.4f}"))
+                                  f"INR={holiday_rates['INR']:.4f}, MXN={holiday_rates['MXN']:.4f}, TRY={holiday_rates['TRY']:.4f}"))
 
-            # 假日模式：INR/MXN 為 USD/XXX 格式，需搭配 usd_rate 換算為 TWD/XXX
-            # TRY 為 TRYTWD 直接匯率，用 (rate, 1)
+            # 假日模式：Oracle 回傳的已是 XXX→TWD 直接匯率，三者皆用 (rate, 1)
             all_rates = {
-                'INR': (usd_rate, holiday_rates['INR']),
-                'MXN': (usd_rate, holiday_rates['MXN']),
+                'INR': (holiday_rates['INR'], 1),
+                'MXN': (holiday_rates['MXN'], 1),
                 'TRY': (holiday_rates['TRY'], 1),
             }
 
@@ -1225,6 +1261,7 @@ def run():
 
 
 if __name__ == "__main__":
+    import sys
     result = run()
     if not result['success']:
         # 獨立執行時，失敗寄送錯誤通知
@@ -1237,3 +1274,4 @@ if __name__ == "__main__":
             file_path=None,
             mailtype="error"
         )
+        sys.exit(1)

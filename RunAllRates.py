@@ -75,7 +75,8 @@ def _build_step_status_html(step_results):
 def _connect_to_db_oracle():
     with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    db_config = config['oracle_db_insert']
+    env = config.get('oracle_active_env', 'uat')
+    db_config = config[f'oracle_insert_{env}']
     client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
     try:
         oracledb.init_oracle_client(lib_dir=client_lib_dir)
@@ -240,7 +241,7 @@ def _send_combined_email(daily_result, web_result):
     msg['To'] = receiver_str
 
     if all_success:
-        subject = f"(測試信)【匯率報告】每日匯率綜合報告 - {conversion_date_display}"
+        subject = f"【匯率報告】每日匯率綜合報告 - {conversion_date_display}"
     else:
         subject = f"【錯誤報告】每日匯率程式異常 - {datetime.now().strftime('%Y-%m-%d')}"
         msg['X-Priority'] = '1'
@@ -317,6 +318,7 @@ def _send_combined_email(daily_result, web_result):
 
 # === Main ===
 if __name__ == "__main__":
+    import sys
     _setup_logging()
     logger.info("=== RunAllRates Started ===")
 
@@ -334,4 +336,7 @@ if __name__ == "__main__":
     logger.info("--- Sending Combined Email ---")
     _send_combined_email(daily_result, web_result)
 
-    logger.info("=== RunAllRates Finished ===")
+    all_success = daily_result['success'] and web_result['success']
+    logger.info(f"=== RunAllRates Finished. Overall success: {all_success} ===")
+    if not all_success:
+        sys.exit(1)

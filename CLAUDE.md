@@ -79,6 +79,7 @@ Two patterns in the codebase:
 
 ## Known Issues & Technical Debt
 
+- **`ImportDailyRate_bk.py` 的 TCB 抓取已失效**：舊版使用 `https://rate.bot.com.tw/xrt/all/{date}` HTML 頁面解析 `<table>`，但 TCB 網站已改版，該頁面不再有 `<table>` 標籤。現版 `ImportDailyRate.py` 已改用 CSV API（`xrt/flcsv/0/{date}`），不受影響。`_bk.py` 僅供參考，勿直接使用。
 - **Hardcoded absolute paths** in ImportWebRate.py, ImportMonthlyRate.py, and run_daily.bat reference `D:/Python/DailyExchangeRate/`. ImportDailyRate.py and ImportPortalRate.py use relative paths correctly.
 - **Deprecated functions** prefixed with `xx` or `xxx` (e.g., `xxinsert_daily_rate`) remain in ImportDailyRate.py.
 - **ImportMonthlyRate.py** has dead code after the `if __name__` block (~line 669+) that would cause runtime errors. This is a legacy script; ImportWebRate.py is its replacement.
