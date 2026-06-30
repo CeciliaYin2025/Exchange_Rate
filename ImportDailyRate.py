@@ -293,8 +293,17 @@ def snapshot_page(url, output_path):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            locale="zh-TW",
+        )
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+        # 等待匯率 table 出現（最多 60 秒，讓 Akamai 挑戰頁通過）
+        try:
+            page.wait_for_selector("table", timeout=60000)
+        except Exception:
+            logger.warning(f"snapshot_page(): table not found within 60s for {url}, screenshotting anyway")
         page.screenshot(path=filepath, full_page=True, type="jpeg", quality=90)
         browser.close()
 

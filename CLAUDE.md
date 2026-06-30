@@ -47,7 +47,7 @@ Each `Import*.py` script is **self-contained** — logging setup, DB connection,
 
 | Script | Source | Currencies | Scraping Method |
 |--------|--------|-----------|-----------------|
-| `ImportDailyRate.py` | CBC (cbc.gov.tw) + TCB (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD | requests + BeautifulSoup; Playwright for screenshots |
+| `ImportDailyRate.py` | CBC (cbc.gov.tw) + TCB (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD | requests + CSV API; Playwright for screenshots（需繞過 Akamai bot 保護） |
 | `ImportWebRate.py` | CBC + CNYES (invest.cnyes.com) | INR, MXN, TRY | Selenium for scraping; async Playwright for screenshots |
 | `ImportPortalRate.py` | Customs portal JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD | requests (JSON API) |
 
@@ -80,6 +80,7 @@ Two patterns in the codebase:
 ## Known Issues & Technical Debt
 
 - **`ImportDailyRate_bk.py` 的 TCB 抓取已失效**：舊版使用 `https://rate.bot.com.tw/xrt/all/{date}` HTML 頁面解析 `<table>`，但 TCB 網站已改版，該頁面不再有 `<table>` 標籤。現版 `ImportDailyRate.py` 已改用 CSV API（`xrt/flcsv/0/{date}`），不受影響。`_bk.py` 僅供參考，勿直接使用。
+- **TCB 截圖需繞過 Akamai bot 保護**：`snapshot_page()` 對 `rate.bot.com.tw` 截圖時，headless Chromium 會被 Akamai 攔截並顯示 30 秒挑戰頁。已透過設定真實 Chrome User-Agent、`wait_until="domcontentloaded"` 及 `wait_for_selector("table", timeout=60000)` 解決。若截圖再次出現 Akamai 攔截頁，表示 bot 偵測規則更新，可考慮改用 `playwright-stealth`。
 - **Hardcoded absolute paths** in ImportWebRate.py, ImportMonthlyRate.py, and run_daily.bat reference `D:/Python/DailyExchangeRate/`. ImportDailyRate.py and ImportPortalRate.py use relative paths correctly.
 - **Deprecated functions** prefixed with `xx` or `xxx` (e.g., `xxinsert_daily_rate`) remain in ImportDailyRate.py.
 - **ImportMonthlyRate.py** has dead code after the `if __name__` block (~line 669+) that would cause runtime errors. This is a legacy script; ImportWebRate.py is its replacement.

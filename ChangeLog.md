@@ -1,5 +1,21 @@
 # ChangeLog
 
+## [2026-06-30]
+
+### Bug Fix：`ImportDailyRate.py` TCB 截圖被 Akamai bot 保護攔截
+
+**問題：** `snapshot_page()` 截到 Akamai 挑戰頁（"Processing your request..." 倒數 30 秒），而非實際匯率表。
+
+**根本原因：** TCB 網站（rate.bot.com.tw）部署了 Akamai bot 保護，headless Chromium 預設無 User-Agent 且不等待 JS 挑戰通過，直接截到攔截頁。
+
+**修正（`ImportDailyRate.py`）：**
+
+- `browser.new_context()` 加入真實 Chrome User-Agent（`Mozilla/5.0 ... Chrome/125`）及 `locale="zh-TW"`
+- `wait_until` 從 `"networkidle"` 改為 `"domcontentloaded"`（Akamai 挑戰頁 network 永遠不 idle）
+- 加入 `page.wait_for_selector("table", timeout=60000)`，等匯率表實際出現後再截圖
+
+---
+
 ## [2026-04-30]
 
 ### Bug Fix：`ImportDailyRate.py` / `ImportWebRate.py` Oracle INSERT 遺漏 `ROUND(:6, 4)`
