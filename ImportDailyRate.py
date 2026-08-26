@@ -149,10 +149,16 @@ def load_db_config(file_path):
         available_keys = list(config.keys()) if config else "Empty File"
         raise KeyError(f"設定檔中找不到 'dev_db' 或 'database'。目前擁有的標籤為: {available_keys}")
 
-def load_oracle_config(file_path):
+def load_oracle_config(file_path, role='query'):
+    """讀取 Oracle 連線設定。role='insert'(servicegate) 或 'query'(ypr)。
+    環境由 oracle_active_env 決定：uat | test2 | prod。"""
     with open(file_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    return config['oracle_db_insert']
+    env = config.get('oracle_active_env', 'uat')
+    key = f'oracle_{role}_{env}'
+    if key not in config:
+        raise KeyError(f"Oracle config key '{key}' not found (oracle_active_env={env})")
+    return config[key]
 
 def load_email_config(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -176,7 +182,7 @@ def connect_to_db_sql():
         return None
 
 def connect_to_db_oracle():
-    db_config = load_oracle_config('config/db_config.yaml')
+    db_config = load_oracle_config('config/db_config.yaml', role='query')
     client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
     try:
         oracledb.init_oracle_client(lib_dir=client_lib_dir)
@@ -193,6 +199,31 @@ def connect_to_db_oracle():
     except Exception as e:
         logger.error("Oracle connection error: %s", e)
         return None
+
+def _get_oracle_insert_connections():
+    """依 oracle_insert_targets 建立並回傳所有寫入目標的連線清單 [(connection, env_label)]。"""
+    with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    targets = config.get('oracle_insert_targets', [config.get('oracle_active_env', 'uat')])
+    client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR')
+    connections = []
+    for env in targets:
+        db_config = config.get(f'oracle_insert_{env}')
+        if db_config is None:
+            logger.warning(f"Oracle insert config for env '{env}' not found, skipping")
+            continue
+        lib_dir = client_lib_dir or db_config.get('client_lib_dir')
+        try:
+            oracledb.init_oracle_client(lib_dir=lib_dir)
+        except oracledb.ProgrammingError:
+            pass
+        conn = oracledb.connect(
+            user=db_config['user'],
+            password=db_config['password'],
+            dsn=f"{db_config['host']}:{db_config['port']}/{db_config['service_name']}"
+        )
+        connections.append((conn, env.upper()))
+    return connections
 
 # === Email ===
 def send_email_notification(subject, body, table_html=None, file_path=None, mailtype=None, image_path=None, additional_image_path=None):
@@ -700,107 +731,103 @@ def insert_usd_rates(rates_with_usd, conversion_date):
 
 def insert_to_oracle(rates, usd_rate, usd_rows, conversion_date):
     """
-    將匯率資料寫入 Oracle Table: YSC.SGLP0021_TEMP
-    包含 TWD-based 及 USD-based 匯率（正向+反向）
+    將匯率資料寫入所有 oracle_insert_targets 的 YSC.SGLP0021_TEMP。
+    包含 TWD-based 及 USD-based 匯率（正向）。
     失敗時拋出例外，由主流程統一處理。
     回傳本次寫入的資料 list[dict]，供 Email 通知使用。
-
-    conversion_date: 匯率適用日期字串 (YYYY-MM-DD)，與 SQL Server 一致。
     """
-    connection = None
-    try:
-        connection = connect_to_db_oracle()
-        if connection is None:
-            raise ConnectionError("Oracle 連線失敗。")
+    oracle_rows = []
+    inserted_data = []
+    conv_dt = datetime.strptime(conversion_date, '%Y-%m-%d')
+    now = datetime.now()
 
-        oracle_rows = []
-        inserted_data = []
-        conv_dt = datetime.strptime(conversion_date, '%Y-%m-%d')
-        now = datetime.now()
+    combined_rates = rates.copy()
+    combined_rates['USD'] = usd_rate
 
-        combined_rates = rates.copy()
-        combined_rates['USD'] = usd_rate
+    # 只寫入正向匯率（XXX→TWD），不寫入反向（TWD→XXX）
+    for currency, rate in combined_rates.items():
+        oracle_rows.append((
+            'TW_BANK', currency, 'TWD', conv_dt, conv_dt,
+            rate, 'I', now, 'N', 'SC_銀行匯率'
+        ))
+        inserted_data.append({
+            'FROM_CURRENCY': currency, 'TO_CURRENCY': 'TWD',
+            'FROM_DATE': conv_dt, 'USER_CONVERSION_TYPE': 'SC_銀行匯率',
+            'CONVERSION_RATE': rate,
+        })
 
-        # 只寫入正向匯率（XXX→TWD），不寫入反向（TWD→XXX）
-        for currency, rate in combined_rates.items():
+    # USD-based: 只寫入正向（XXX→USD），過濾反向（USD→XXX）
+    for row in usd_rows:
+        if row['to_currency'] == 'USD':
             oracle_rows.append((
-                'TW_BANK', currency, 'TWD', conv_dt, conv_dt,
-                rate, 'I', now, 'N', 'SC_銀行匯率'
+                'TW_BANK', row['from_currency'], row['to_currency'], conv_dt, conv_dt,
+                row['conversion_rate'], 'I', now, 'N', 'SC_銀行匯率'
             ))
             inserted_data.append({
-                'FROM_CURRENCY': currency, 'TO_CURRENCY': 'TWD',
+                'FROM_CURRENCY': row['from_currency'],
+                'TO_CURRENCY': row['to_currency'],
                 'FROM_DATE': conv_dt, 'USER_CONVERSION_TYPE': 'SC_銀行匯率',
-                'CONVERSION_RATE': rate,
+                'CONVERSION_RATE': row['conversion_rate'],
             })
 
-        # USD-based: 只寫入正向（XXX→USD），過濾反向（USD→XXX）
-        for row in usd_rows:
-            if row['to_currency'] == 'USD':
-                oracle_rows.append((
-                    'TW_BANK', row['from_currency'], row['to_currency'], conv_dt, conv_dt,
-                    row['conversion_rate'], 'I', now, 'N', 'SC_銀行匯率'
-                ))
-                inserted_data.append({
-                    'FROM_CURRENCY': row['from_currency'],
-                    'TO_CURRENCY': row['to_currency'],
-                    'FROM_DATE': conv_dt, 'USER_CONVERSION_TYPE': 'SC_銀行匯率',
-                    'CONVERSION_RATE': row['conversion_rate'],
-                })
+    delete_sql = """
+        DELETE FROM YSC.SGLP0021_TEMP
+        WHERE TRUNC(FROM_DATE) = TRUNC(:1)
+          AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
+    """
+    insert_sql = """
+        INSERT INTO YSC.SGLP0021_TEMP (
+            SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
+            CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
+            USER_CONVERSION_TYPE
+        ) VALUES (:1, :2, :3, :4, :5, ROUND(:6, 4), :7, :8, :9, :10)
+    """
 
-        # 先刪除同日的 SC_銀行匯率 資料，避免重複
-        cursor = connection.cursor()
-        delete_sql = """
-            DELETE FROM YSC.SGLP0021_TEMP
-            WHERE TRUNC(FROM_DATE) = TRUNC(:1)
-              AND USER_CONVERSION_TYPE = 'SC_銀行匯率'
-        """
-        cursor.execute(delete_sql, [conv_dt])
-        deleted_count = cursor.rowcount
-        logger.info(f"已刪除 Oracle 同日 SC_銀行匯率 {deleted_count} 筆")
+    connections = _get_oracle_insert_connections()
+    if not connections:
+        raise ConnectionError("Oracle 無可用的 insert 目標環境")
 
-        insert_sql = """
-            INSERT INTO YSC.SGLP0021_TEMP (
-                SOURCE_FROM, FROM_CURRENCY, TO_CURRENCY, FROM_DATE, TO_DATE,
-                CONVERSION_RATE, MODE_FLAG, IMPORTED_DATE, IMPORTED_FLAG,
-                USER_CONVERSION_TYPE
-            ) VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)
-        """
+    errors = []
+    for connection, env_label in connections:
+        try:
+            cursor = connection.cursor()
+            cursor.execute(delete_sql, [conv_dt])
+            logger.info(f"[{env_label}] 已刪除 Oracle 同日 SC_銀行匯率 {cursor.rowcount} 筆")
 
-        cursor.executemany(insert_sql, oracle_rows)
-        connection.commit()
-        logger.info(f"成功寫入 Oracle 資料庫 (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
+            cursor.executemany(insert_sql, oracle_rows)
+            connection.commit()
+            logger.info(f"[{env_label}] 成功寫入 Oracle (YSC.SGLP0021_TEMP)，共 {len(oracle_rows)} 筆")
 
-        # 執行 sglp0021_pkg.main 將 TEMP 資料轉入正式表
-        logger.info("開始執行 sglp0021_pkg.main ...")
-        cursor2 = connection.cursor()
-        l_errbuf = cursor2.var(oracledb.STRING, 2000)
-        l_retcode = cursor2.var(oracledb.STRING, 10)
-        cursor2.execute("""
-            BEGIN
-                APPS.sglp0021_pkg.main(:errbuf, :retcode);
-            END;
-        """, {'errbuf': l_errbuf, 'retcode': l_retcode})
-        connection.commit()
-        errbuf_val = l_errbuf.getvalue()
-        retcode_val = l_retcode.getvalue()
-        cursor2.close()
-        logger.info(f"sglp0021_pkg.main 執行完成。retcode={retcode_val}, errbuf={errbuf_val}")
+            logger.info(f"[{env_label}] 開始執行 sglp0021_pkg.main ...")
+            cursor2 = connection.cursor()
+            l_errbuf = cursor2.var(oracledb.STRING, 2000)
+            l_retcode = cursor2.var(oracledb.STRING, 10)
+            cursor2.execute("""
+                BEGIN
+                    APPS.sglp0021_pkg.main(:errbuf, :retcode);
+                END;
+            """, {'errbuf': l_errbuf, 'retcode': l_retcode})
+            connection.commit()
+            errbuf_val = l_errbuf.getvalue()
+            retcode_val = l_retcode.getvalue()
+            cursor2.close()
+            logger.info(f"[{env_label}] sglp0021_pkg.main 完成。retcode={retcode_val}, errbuf={errbuf_val}")
 
-        if str(retcode_val) != '0':
-            raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
+            if str(retcode_val) != '0':
+                raise RuntimeError(f"sglp0021_pkg.main 執行失敗 (retcode={retcode_val}): {errbuf_val}")
 
-        cursor.close()
-
-        return inserted_data
-
-    except Exception as e:
-        logger.error(f"Oracle 寫入失敗: {e}")
-        if connection:
+            cursor.close()
+        except Exception as e:
+            logger.error(f"[{env_label}] Oracle 寫入失敗: {e}")
             connection.rollback()
-        raise
-    finally:
-        if connection:
+            errors.append(f"[{env_label}] {e}")
+        finally:
             connection.close()
+
+    if errors:
+        raise RuntimeError(f"Oracle 寫入失敗: {'; '.join(errors)}")
+
+    return inserted_data
 
 # === Step Status HTML ===
 def _build_step_status_html(step_results):
