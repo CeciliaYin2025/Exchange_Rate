@@ -274,7 +274,7 @@ def send_email_notification(subject, body, table_html=None, file_path=None, mail
 def fetch_json():
     """從關務署 API 抓取最新三旬匯率 JSON，回傳 (filtered_items, start, end, raw_data)。"""
     url = "https://portal.sw.nat.gov.tw/APGQ/GC331!downLoad?formBean.downLoadFile=CURRENT_JSON"
-    response = requests.get(url, timeout=10)
+    response = requests.get(url, timeout=10, verify=False)
     if response.status_code != 200:
         logger.error(f"API 請求失敗，狀態碼: {response.status_code}")
         return None
