@@ -8,7 +8,7 @@
 |------|----------|------|----------|
 | `ImportDailyRate.py` | 央行 (cbc.gov.tw) + 台銀 (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD | requests + BeautifulSoup；Playwright 截圖 |
 | `ImportWebRate.py` | 央行 + 鉅亨網 (invest.cnyes.com) | INR, MXN, TRY | Selenium 抓取；假日模式由 Oracle 取得前一交易日匯率 |
-| `ImportPortalRate.py` | 關務署 JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD | requests (JSON API) |
+| `ImportPortalRate.py` | 關務署 JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD, CNY | requests (JSON API) |
 | `RunAllRates.py` | 合併執行 Daily + Web | 全部銀行匯率幣別 | 統一 Email 通知 |
 
 ## 執行流程
@@ -95,7 +95,7 @@ cp config/email_config.yaml.sample config/email_config.yaml
 # 每日銀行匯率 (CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD, INR, MXN, TRY)
 uv run python RunAllRates.py
 
-# 三旬匯率 (EUR, JPY, USD — 關務署 API)
+# 三旬匯率 (EUR, JPY, USD, CNY — 關務署 API)
 uv run python ImportPortalRate.py
 ```
 

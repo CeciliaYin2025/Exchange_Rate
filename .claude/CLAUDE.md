@@ -15,7 +15,7 @@ python ImportDailyRate.py
 # Monthly rates (INR, MXN, TRY vs TWD) - uses Selenium + Playwright
 python ImportWebRate.py
 
-# Portal rates (EUR, JPY, USD from customs portal JSON API)
+# Portal rates (EUR, JPY, USD, CNY from customs portal JSON API)
 python ImportPortalRate.py
 
 ```
@@ -41,7 +41,7 @@ Each `Import*.py` script is **self-contained** with its own copies of shared uti
 |--------|--------|-----------|
 | `ImportDailyRate.py` | CBC (cbc.gov.tw) + TCB (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD |
 | `ImportWebRate.py` | CBC + CNYES (invest.cnyes.com) via Selenium | INR, MXN, TRY |
-| `ImportPortalRate.py` | Customs portal JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD |
+| `ImportPortalRate.py` | Customs portal JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD, CNY |
 
 ### Database Target
 

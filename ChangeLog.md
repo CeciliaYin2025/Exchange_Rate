@@ -1,5 +1,41 @@
 # ChangeLog
 
+## [2026-11-11]（2026-11-10 開發測試，2026-11-11 ERP 確認後上版 PROD）
+
+### 新增：`ImportPortalRate.py` 三旬匯率加入 CNY
+
+**需求：** 三旬匯率（`SC_三旬匯率`）新增 CNY→TWD。
+
+**修正（`ImportPortalRate.py`）：**
+
+- 新增常數 `PORTAL_CURRENCIES = ['EUR', 'JPY', 'USD', 'CNY']`，`fetch_json()` 改用此清單篩選幣別（原為寫死 `['EUR', 'JPY', 'USD']`）
+- 寫入筆數變化：SQL Server DWNotes 每期 6 → 8 筆（雙向）；Oracle `YSC.SGLP0021_TEMP` 每期 3 → 4 筆（單向，TWD→CNY 由 `sglp0021_pkg` 產生）
+
+### 修正：三旬匯率 Email 表格改為 DISTINCT
+
+**問題：** Email 的 Oracle ERP 匯率表從 `GL_DAILY_RATES_V` 查詢，該 view 每天一筆，每幣別每方向約 10 筆重複資料；新增 CNY 後表格會更長。
+
+**修正：** `query_oracle_portal_rates()` 改為 `SELECT DISTINCT FROM_CURRENCY, TO_CURRENCY, USER_CONVERSION_TYPE, CONVERSION_RATE`（去掉 `CONVERSION_DATE`），每幣別每方向一筆。Excel「Oracle ERP」sheet 仍保留每日明細。
+
+### Bug Fix：`connect_to_db_oracle()` 查詢使用錯誤帳號
+
+**問題：** 在 TEST2 查詢 `APPS.GL_DAILY_RATES_V` 出現 `ORA-00942: table or view does not exist`，導致 Excel「Oracle ERP」sheet 空白、Email 表格退回備援資料。
+
+**根本原因：** `connect_to_db_oracle()` 呼叫 `load_oracle_config()` 未指定 role，預設使用 `insert`（servicegate）帳號；servicegate 在 TEST2 無此 view 權限。
+
+**修正：** 改為 `load_oracle_config(..., role='query')`，使用 ypr 查詢帳號。
+
+### 測試紀錄（local，2026-11-10，期間 20261111~20261120）
+
+- Oracle 僅寫入 TEST2：4 筆，`sglp0021_pkg.main` retcode=0、Processed records: 4；`GL_DAILY_RATES_V` 共 80 筆，DISTINCT 後 8 筆
+- SQL Server DWNotes（正式 DW）：已寫入 8 筆，**CNY↔TWD 已存在於 DWNotes**
+- Email 僅寄 `cecilia_yin@sercomm.com`
+- 測試後 `config/db_config.yaml` 已還原（`oracle_active_env: uat`、`oracle_insert_targets: [uat, test2, prod]`）
+
+**上版：** 2026-11-11 ERP 確認新增 CNY 三旬匯率對 ERP 無影響，上版 PROD。
+
+---
+
 ## [2026-06-30]
 
 ### Bug Fix：`ImportDailyRate.py` TCB 截圖被 Akamai bot 保護攔截

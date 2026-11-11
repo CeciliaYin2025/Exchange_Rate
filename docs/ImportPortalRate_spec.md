@@ -22,7 +22,7 @@
          ┌─────────────▼──────────────────────────┐
          │  Step 1: API 資料抓取                    │
          │  fetch_json()                           │
-         │  (EUR, JPY, USD from API)               │
+         │  (EUR, JPY, USD, CNY from API)          │
          │  + 儲存原始 JSON 到 ./data/portal/{yymmdd}/ │
          └─────────────┬──────────────────────────┘
                        │
@@ -57,7 +57,7 @@
 
 | 來源 | 網址 | 用途 | 抓取方式 |
 |------|------|------|----------|
-| 關務署 | `https://portal.sw.nat.gov.tw/APGQ/GC331!downLoad?formBean.downLoadFile=CURRENT_JSON` | EUR/JPY/USD 三旬匯率 | requests (JSON API) |
+| 關務署 | `https://portal.sw.nat.gov.tw/APGQ/GC331!downLoad?formBean.downLoadFile=CURRENT_JSON` | EUR/JPY/USD/CNY 三旬匯率 | requests (JSON API) |
 
 ### API 回傳結構
 
@@ -243,7 +243,7 @@ email:
 ### 9.1 原始 JSON 儲存
 
 - `fetch_json()` 回傳 4-tuple: `(filtered_items, start, end, raw_data)`
-- `raw_data` 為 API 完整回傳 dict (含 start, end, items)，包含所有幣別 (非僅 EUR/JPY/USD)
+- `raw_data` 為 API 完整回傳 dict (含 start, end, items)，包含所有幣別 (非僅 EUR/JPY/USD/CNY)
 - 儲存格式：UTF-8, indent=2
 
 ### 9.2 Excel 報表 (3 Sheets)

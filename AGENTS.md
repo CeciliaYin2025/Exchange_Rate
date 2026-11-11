@@ -18,7 +18,7 @@ python ImportDailyRate.py
 # Monthly rates (INR, MXN, TRY vs TWD) - uses Selenium + Playwright
 python ImportWebRate.py
 
-# Portal rates (EUR, JPY, USD from customs portal JSON API)
+# Portal rates (EUR, JPY, USD, CNY from customs portal JSON API)
 python ImportPortalRate.py
 
 # Legacy monthly rates (older version of ImportWebRate.py, not actively used)
@@ -49,7 +49,7 @@ Each `Import*.py` script is **self-contained** — logging setup, DB connection,
 |--------|--------|-----------|-----------------|
 | `ImportDailyRate.py` | CBC (cbc.gov.tw) + TCB (rate.bot.com.tw) | CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD | requests + BeautifulSoup; Playwright for screenshots |
 | `ImportWebRate.py` | CBC + CNYES (invest.cnyes.com) | INR, MXN, TRY | Selenium for scraping; async Playwright for screenshots |
-| `ImportPortalRate.py` | Customs portal JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD | requests (JSON API) |
+| `ImportPortalRate.py` | Customs portal JSON API (portal.sw.nat.gov.tw) | EUR, JPY, USD, CNY | requests (JSON API) |
 
 ### Database Patterns
 
@@ -63,7 +63,7 @@ Each `Import*.py` script is **self-contained** — logging setup, DB connection,
 **DB connection libraries differ by script:**
 - `ImportDailyRate.py` — SQLAlchemy + **pymssql** for SQL Server; oracledb **Thick mode** for Oracle
 - `ImportWebRate.py` — **pyodbc** for SQL Server; oracledb **Thin mode** for Oracle
-- `ImportPortalRate.py` — **pyodbc** only
+- `ImportPortalRate.py` — **mssql_python** for SQL Server (DWNotes); oracledb **Thick mode** for Oracle (insert: servicegate, query GL_DAILY_RATES_V: ypr)
 - Config priority: ImportDailyRate and ImportWebRate try `dev_db` first, fall back to `database`; ImportPortalRate uses `database` directly
 
 ### MERGE SQL Variants

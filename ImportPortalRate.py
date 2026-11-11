@@ -24,6 +24,9 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'config', 'html', 'templa
 
 RUN_LOGS = []
 
+# 三旬匯率要處理的幣別（對 TWD）
+PORTAL_CURRENCIES = ['EUR', 'JPY', 'USD', 'CNY']
+
 # === Template Loading ===
 def _load_template(name):
     """從 config/html/template/ 載入 HTML template 檔案，回傳 string.Template 物件。"""
@@ -170,7 +173,8 @@ def connect_to_db_sql():
         return None
 
 def connect_to_db_oracle():
-    db_config = load_oracle_config('config/db_config.yaml')
+    # 查詢 GL_DAILY_RATES_V 需使用 ypr 查詢帳號（servicegate 在部分環境無此 view 權限）
+    db_config = load_oracle_config('config/db_config.yaml', role='query')
     client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
     try:
         oracledb.init_oracle_client(lib_dir=client_lib_dir)
@@ -283,7 +287,7 @@ def fetch_json():
     json_start = data['start']
     json_end = data['end']
 
-    json_filtered_items = [item for item in data['items'] if item['code'] in ['EUR', 'JPY', 'USD']]
+    json_filtered_items = [item for item in data['items'] if item['code'] in PORTAL_CURRENCIES]
 
     for item in json_filtered_items:
         try:
@@ -330,20 +334,21 @@ def query_oracle_portal_rates(start, end):
         end_date = datetime.strptime(end, '%Y%m%d')
 
         cursor = connection.cursor()
+        # GL_DAILY_RATES_V 每天一筆；Email 只顯示期間，故去掉日期後 DISTINCT，每幣別一筆
         sql = """
-            SELECT FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE,
+            SELECT DISTINCT FROM_CURRENCY, TO_CURRENCY,
                    USER_CONVERSION_TYPE, CONVERSION_RATE
             FROM APPS.GL_DAILY_RATES_V
             WHERE CONVERSION_DATE BETWEEN :1 AND :2
               AND USER_CONVERSION_TYPE = 'SC_三旬匯率'
-            ORDER BY FROM_CURRENCY, TO_CURRENCY, CONVERSION_DATE
+            ORDER BY FROM_CURRENCY, TO_CURRENCY
         """
         cursor.execute(sql, [start_date, end_date])
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
         cursor.close()
 
-        logger.info(f"Oracle GL_DAILY_RATES_V 查詢到 {len(rows)} 筆 SC_三旬匯率 資料")
+        logger.info(f"Oracle GL_DAILY_RATES_V 查詢到 {len(rows)} 筆 SC_三旬匯率 資料 (DISTINCT)")
         return [dict(zip(columns, row)) for row in rows]
 
     except Exception as e:
