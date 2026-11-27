@@ -1,5 +1,33 @@
 # ChangeLog
 
+## [2026-11-27]
+
+### 新增：銀行匯率寫入 DWNotes（主）與 SERVICE_TEST（輔）
+
+**需求：** 銀行匯率（`SC_銀行匯率`）以 `DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE`（172.31.3.31）為主、`SERVICE_TEST`（172.31.3.119）為輔，兩邊都寫入 17:30 抓到的匯率，並回補 DWNotes 缺少的期間。
+
+**修正（`ImportDailyRate.py` / `ImportWebRate.py`）：**
+
+- 新增 `connect_to_db_dwnotes()`（讀 `db_config.yaml` 的 `database_notes`）
+- `_execute_merge_rate()` 新增 `db` 參數；寫 DWNotes 時比對 key 一律加上 `user_conversion_type`，不會覆蓋同日期的 `SC_三旬匯率`
+- 寫入順序：先 DWNotes（主，失敗即中斷，該步驟失敗、寄錯誤信、Airflow 重試），再 SERVICE_TEST（輔，失敗只在 Email 步驟表顯示「SERVICE_TEST（輔）失敗」，不中斷後續 Oracle 寫入）
+- `ImportWebRate.prepare_and_merge_sql_server()` 回傳值改為 `(rows, service_test_error)`
+- Excel 報表的 SQL Server 工作表改從 DWNotes 讀取
+- 每天寫入筆數：Daily 26 筆（TWD 16 + USD 10）、Web 6 筆，合計 32 筆
+
+**新增（`tools/backfill_dwnotes_bank_rates.py`）：** 回補工具，來源可選 `oracle`（PROD `GL_DAILY_RATES_V`）或 `servicetest`，預設只預覽，加 `--apply` 才寫入。
+
+**測試（`test/`）：** 更新 `TestInsertDailyRate`、`TestInsertUsdRates`、`TestPrepareAndMergeSqlServer`（驗證先寫 DWNotes、SERVICE_TEST 失敗不中斷）及報表測試的連線 mock。全套測試失敗數與修改前相同（27 個既有失敗，與本次無關）。
+
+**回補（2026-11-27 執行）：** DWNotes 原有銀行匯率只到 2025-12-03（由其他系統於每晚 23:5x 寫入，之後停止）。以 Oracle PROD GL 回補 2025-12-04 ~ 2026-11-27，共 359 天 × 32 筆 = 11,488 筆；`SC_三旬匯率` 270 筆不受影響。
+
+- 回補來源選 GL 而非 SERVICE_TEST：SERVICE_TEST 從 2026-02-02 才有資料，且 2~4 月有已知錯誤值（TRY 正反向寫反、假日 INR/MXN）與 8 天缺漏；GL 為 ERP 正式資料
+- 已知差異：每日寫入的 `TWD→INR` 與 GL 約差 0.0003（GL 由四捨五入後的 INR→TWD 反算），其他幣別一致
+
+**測試（local，2026-11-27 17:18）：** Oracle 僅寫 TEST2（retcode=0，Daily 13 筆、Web 3 筆），DWNotes 與 SERVICE_TEST 各寫 32 筆（2026-11-28），`SC_三旬匯率` 不受影響，Email 僅寄 `cecilia_yin@sercomm.com`，exit code 0。
+
+---
+
 ## [2026-11-11]（2026-11-10 開發測試，2026-11-11 ERP 確認後上版 PROD）
 
 ### 新增：`ImportPortalRate.py` 三旬匯率加入 CNY
@@ -33,6 +61,12 @@
 - 測試後 `config/db_config.yaml` 已還原（`oracle_active_env: uat`、`oracle_insert_targets: [uat, test2, prod]`）
 
 **上版：** 2026-11-11 ERP 確認新增 CNY 三旬匯率對 ERP 無影響，上版 PROD。
+
+### 設定變更：PROD 主機查詢環境改為 PROD
+
+**問題：** PROD 主機 `config/db_config.yaml` 的 `oracle_active_env` 為 `uat`，三支程式的 Email/Excel 報表皆查 UAT 的 `GL_DAILY_RATES_V`，而非 PROD 實際資料（UAT 含測試用未來日期資料，與 PROD 不一致）。
+
+**修正（PROD 主機 `config/db_config.yaml`，不在 repo 內）：** `oracle_active_env: "uat"` → `"prod"`。已先驗證 PROD ypr 帳號可讀 `APPS.GL_DAILY_RATES_V`。寫入目標 `oracle_insert_targets` 不變（uat / test2 / prod）。原設定備份於 `/Projects/backup/db_config.yaml.20261111_033615`。
 
 ---
 

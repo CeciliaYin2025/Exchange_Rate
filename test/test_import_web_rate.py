@@ -188,39 +188,54 @@ class TestCalculateMonthlyRates:
 # =========================================================================
 
 class TestPrepareAndMergeSqlServer:
-    """Tests for prepare_and_merge_sql_server()."""
+    """Tests for prepare_and_merge_sql_server(): DWNotes（主）先寫，SERVICE_TEST（輔）後寫。"""
 
-    def test_sql_merge_bidirectional(self):
-        mock_cursor = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
+    @staticmethod
+    def _conn():
+        cur = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        return conn, cur
 
+    def test_sql_merge_bidirectional_in_both_dbs(self):
+        dw, dw_cur = self._conn()
+        st, st_cur = self._conn()
         all_rates = {'INR': (31.5, 83.0), 'MXN': (31.5, 20.5)}
-
-        with patch("ImportWebRate.connect_to_db_sql", return_value=mock_conn):
-            rows = iwr.prepare_and_merge_sql_server(all_rates, date(2026, 2, 14))
-
-        # 2 currencies * 2 directions = 4 execute calls
-        assert mock_cursor.execute.call_count == 4
+        with patch("ImportWebRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportWebRate.connect_to_db_sql", return_value=st):
+            rows, st_error = iwr.prepare_and_merge_sql_server(all_rates, date(2026, 2, 14))
+        # 2 currencies * 2 directions = 4 execute calls per DB
         assert len(rows) == 4
-        mock_conn.commit.assert_called_once()
+        assert st_error is None
+        assert dw_cur.execute.call_count == 4
+        assert st_cur.execute.call_count == 4
+        assert "MERGE DWNotes.dbo" in dw_cur.execute.call_args_list[0][0][0]
+        assert "user_conversion_type = N'SC_" in dw_cur.execute.call_args_list[0][0][0]
+        assert "MERGE SERVICE_TEST.dbo" in st_cur.execute.call_args_list[0][0][0]
 
-    def test_connection_failure_raises(self):
-        with patch("ImportWebRate.connect_to_db_sql", return_value=None):
+    def test_dwnotes_connection_failure_raises(self):
+        with patch("ImportWebRate.connect_to_db_dwnotes", return_value=None), \
+             patch("ImportWebRate.connect_to_db_sql", return_value=MagicMock()):
             with pytest.raises(ConnectionError):
                 iwr.prepare_and_merge_sql_server({'INR': (31.5, 83.0)}, date(2026, 2, 14))
 
-    def test_write_failure_rollbacks(self):
-        mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("DB error")
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-
-        with patch("ImportWebRate.connect_to_db_sql", return_value=mock_conn):
+    def test_dwnotes_write_failure_rollbacks(self):
+        dw, dw_cur = self._conn()
+        dw_cur.execute.side_effect = Exception("DB error")
+        with patch("ImportWebRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportWebRate.connect_to_db_sql", return_value=MagicMock()):
             with pytest.raises(Exception, match="DB error"):
                 iwr.prepare_and_merge_sql_server({'INR': (31.5, 83.0)}, date(2026, 2, 14))
+        dw.rollback.assert_called_once()
 
-        mock_conn.rollback.assert_called_once()
+    def test_service_test_failure_is_reported_not_raised(self):
+        dw, _ = self._conn()
+        with patch("ImportWebRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportWebRate.connect_to_db_sql", return_value=None):
+            rows, st_error = iwr.prepare_and_merge_sql_server({'INR': (31.5, 83.0)}, date(2026, 2, 14))
+        assert len(rows) == 2
+        assert st_error and "SERVICE_TEST" in st_error
+        dw.commit.assert_called_once()
 
 
 class TestInsertToOracle:
@@ -437,7 +452,7 @@ class TestExportMonthlyReportAndEmail:
         step_results = [("Step 1", "OK"), ("Step 2", "OK")]
 
         with (
-            patch("ImportWebRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportWebRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportWebRate.connect_to_db_oracle", return_value=mock_oracle_conn),
             patch("ImportWebRate.send_email_notification", mock_send),
             patch("ImportWebRate.build_monthly_rate_table", return_value="<table></table>"),
@@ -481,7 +496,7 @@ class TestExportMonthlyReportAndEmail:
         step_results = [("Step 1", "OK")]
 
         with (
-            patch("ImportWebRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportWebRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportWebRate.connect_to_db_oracle", return_value=None),
             patch("ImportWebRate.send_email_notification", mock_send),
             patch("ImportWebRate.build_monthly_rate_table", return_value="<table></table>"),
@@ -504,7 +519,7 @@ class TestExportMonthlyReportAndEmail:
         step_results = [("Step 1", "OK")]
 
         with (
-            patch("ImportWebRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportWebRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportWebRate.connect_to_db_oracle", side_effect=Exception("Oracle down")),
             patch("ImportWebRate.send_email_notification", mock_send),
             patch("ImportWebRate.build_monthly_rate_table", return_value="<table></table>"),
@@ -537,7 +552,7 @@ class TestExportMonthlyReportAndEmail:
         step_results = []
 
         with (
-            patch("ImportWebRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportWebRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportWebRate.send_email_notification", mock_send),
         ):
             iwr.export_monthly_report_and_email(rows_to_insert, step_results)

@@ -187,6 +187,22 @@ def connect_to_db_sql():
         logger.error("Database connection error: %s", e)
         return None
 
+def connect_to_db_dwnotes():
+    """DWNotes（172.31.3.31，db_config 的 database_notes）— 銀行匯率的主要寫入目標。"""
+    with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
+        db_config = yaml.safe_load(f)['database_notes']
+    try:
+        return mssql_python.connect(
+            f"SERVER={db_config['server']};"
+            f"DATABASE={db_config['database']};"
+            f"UID={db_config['username']};"
+            f"PWD={db_config['password']};"
+            f"Encrypt=no;"
+        )
+    except Exception as e:
+        logger.error("DWNotes connection error: %s", e)
+        return None
+
 def connect_to_db_oracle():
     db_config = load_oracle_config('config/db_config.yaml')
     client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
@@ -526,15 +542,18 @@ def calculate_monthly_rates(all_currency_rates, target_date):
 
 # === Database Operations (MERGE/Upsert) ===
 def _execute_merge_rate(cursor, from_currency, to_currency, conversion_date,
-                        rate, rev_rate):
-    """Execute a MERGE upsert for a single rate pair into SERVICE_TEST."""
-    merge_sql = """
-        MERGE SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE AS target
+                        rate, rev_rate, db='DWNotes'):
+    """Execute a MERGE upsert for a single rate pair into db（DWNotes 或 SERVICE_TEST）。
+    DWNotes 同時存有 SC_三旬匯率，比對 key 加上 user_conversion_type，避免覆蓋。"""
+    extra_on = "AND target.user_conversion_type = N'SC_銀行匯率'" if db == 'DWNotes' else ""
+    merge_sql = f"""
+        MERGE {db}.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE AS target
         USING (SELECT ? AS from_currency, ? AS to_currency, ? AS from_conversion_date) AS src
         ON (
             target.from_currency = src.from_currency
             AND target.to_currency = src.to_currency
             AND target.from_conversion_date = src.from_conversion_date
+            {extra_on}
         )
         WHEN MATCHED THEN
             UPDATE SET
@@ -561,17 +580,12 @@ def _execute_merge_rate(cursor, from_currency, to_currency, conversion_date,
 
     cursor.execute(merge_sql, params)
 
-def prepare_and_merge_sql_server(all_currency_rates, target_date):
-    """計算匯率並寫入 SQL Server，回傳 rows list。"""
-    rows = calculate_monthly_rates(all_currency_rates, target_date)
-
-    connection = connect_to_db_sql()
+def _merge_rows(db, connect, rows):
+    """把 rows 以單一 transaction MERGE 到 db。"""
+    connection = connect()
     if connection is None:
-        logger.error("無法建立資料庫連線，請檢查 db_config.yaml 與網路連線。")
-        raise ConnectionError("Database connection failed.")
-
+        raise ConnectionError(f"{db} 資料庫連線失敗，請檢查 db_config.yaml 與網路連線。")
     cursor = connection.cursor()
-
     try:
         for param_dict in rows:
             _execute_merge_rate(
@@ -581,18 +595,33 @@ def prepare_and_merge_sql_server(all_currency_rates, target_date):
                 param_dict["rate_date"],
                 param_dict["v_rate"],
                 param_dict["rev_rate"],
+                db=db,
             )
         connection.commit()
-        logger.info(f"SQL Server 更新成功，共 {len(rows)} 筆")
+        logger.info(f"{db} 更新成功，共 {len(rows)} 筆")
     except Exception as e:
-        logger.error(f"SQL Server 更新失敗: {e}")
+        logger.error(f"{db} 更新失敗: {e}")
         connection.rollback()
         raise
     finally:
         cursor.close()
         connection.close()
 
-    return rows
+def prepare_and_merge_sql_server(all_currency_rates, target_date):
+    """計算匯率並寫入 SQL Server：先寫 DWNotes（主，失敗即 raise），
+    再寫 SERVICE_TEST（輔，失敗只記錄、不中斷）。
+    回傳 (rows, service_test_error)；SERVICE_TEST 成功時 error 為 None。"""
+    rows = calculate_monthly_rates(all_currency_rates, target_date)
+
+    _merge_rows('DWNotes', connect_to_db_dwnotes, rows)
+    try:
+        _merge_rows('SERVICE_TEST', connect_to_db_sql, rows)
+        st_error = None
+    except Exception as e:
+        logger.warning(f"SERVICE_TEST（輔）寫入失敗，DWNotes 已寫入: {e}")
+        st_error = str(e)
+
+    return rows, st_error
 
 def insert_to_oracle(rows_data):
     """
@@ -828,7 +857,7 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
     connection = None
     try:
         # === Sheet 1: SQL Server ===
-        connection = connect_to_db_sql()
+        connection = connect_to_db_dwnotes()
         if connection is None:
             logger.warning("無法連線資料庫查詢報表資料。")
             return
@@ -836,12 +865,12 @@ def export_monthly_report_and_email(rows_to_insert, step_results, oracle_inserte
         sql_query = """
         SELECT from_currency, to_currency, from_conversion_date,
                conversion_rate, inverse_conversion_rate
-        FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
-        WHERE from_currency IN ('INR', 'MXN', 'TRY')
+        FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+        WHERE from_currency IN ('INR', 'MXN', 'TRY') AND user_conversion_type = N'SC_銀行匯率'
           AND from_conversion_date = (
               SELECT MAX(from_conversion_date)
-              FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
-              WHERE from_currency IN ('INR', 'MXN', 'TRY')
+              FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+              WHERE from_currency IN ('INR', 'MXN', 'TRY') AND user_conversion_type = N'SC_銀行匯率'
           )
         ORDER BY from_currency, to_currency
         """
@@ -1083,9 +1112,11 @@ async def _async_run():
             }
 
         # ===== Step 3: SQL Server 寫入 =====
-        current_step = "Step 3: SQL Server 寫入"
-        rows = prepare_and_merge_sql_server(all_rates, date.today() + timedelta(days=1))
-        step_results.append(("Step 3: SQL Server", f"{len(rows)} 筆匯率 Upsert 成功"))
+        current_step = "Step 3: SQL Server 寫入（DWNotes）"
+        rows, st_error = prepare_and_merge_sql_server(all_rates, date.today() + timedelta(days=1))
+        step_results.append(("Step 3: SQL Server（DWNotes）", f"{len(rows)} 筆匯率 Upsert 成功"))
+        if st_error:
+            step_results.append(("Step 3: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
 
         # ===== Step 4: Oracle 寫入 =====
         current_step = "Step 4: Oracle 寫入"
@@ -1137,7 +1168,7 @@ def _export_web_excel(rows_data, oracle_inserted_data):
     connection = None
     try:
         # === Sheet 1: SQL Server ===
-        connection = connect_to_db_sql()
+        connection = connect_to_db_dwnotes()
         if connection is None:
             logger.warning("無法連線資料庫查詢報表資料。")
             return None
@@ -1145,12 +1176,12 @@ def _export_web_excel(rows_data, oracle_inserted_data):
         sql_query = """
         SELECT from_currency, to_currency, from_conversion_date,
                conversion_rate, inverse_conversion_rate
-        FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
-        WHERE from_currency IN ('INR', 'MXN', 'TRY')
+        FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+        WHERE from_currency IN ('INR', 'MXN', 'TRY') AND user_conversion_type = N'SC_銀行匯率'
           AND from_conversion_date = (
               SELECT MAX(from_conversion_date)
-              FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
-              WHERE from_currency IN ('INR', 'MXN', 'TRY')
+              FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+              WHERE from_currency IN ('INR', 'MXN', 'TRY') AND user_conversion_type = N'SC_銀行匯率'
           )
         ORDER BY from_currency, to_currency
         """

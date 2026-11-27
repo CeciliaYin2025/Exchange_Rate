@@ -181,6 +181,22 @@ def connect_to_db_sql():
         logger.error("Database connection error: %s", e)
         return None
 
+def connect_to_db_dwnotes():
+    """DWNotes（172.31.3.31，db_config 的 database_notes）— 銀行匯率的主要寫入目標。"""
+    with open('config/db_config.yaml', 'r', encoding='utf-8') as f:
+        db_config = yaml.safe_load(f)['database_notes']
+    try:
+        return mssql_python.connect(
+            f"SERVER={db_config['server']};"
+            f"DATABASE={db_config['database']};"
+            f"UID={db_config['username']};"
+            f"PWD={db_config['password']};"
+            f"Encrypt=no;"
+        )
+    except Exception as e:
+        logger.error("DWNotes connection error: %s", e)
+        return None
+
 def connect_to_db_oracle():
     db_config = load_oracle_config('config/db_config.yaml', role='query')
     client_lib_dir = os.environ.get('ORACLE_CLIENT_LIB_DIR') or db_config.get('client_lib_dir')
@@ -626,14 +642,17 @@ def build_oracle_rate_table(oracle_rows):
 
 # === Database Operations (MERGE/Upsert) ===
 def _execute_merge_rate(cursor, from_currency, to_currency, conversion_date,
-                        rate, rev_rate, match_conversion_type=False):
-    """Execute a MERGE upsert for a single rate pair."""
+                        rate, rev_rate, match_conversion_type=False, db='DWNotes'):
+    """Execute a MERGE upsert for a single rate pair into db（DWNotes 或 SERVICE_TEST）。
+    DWNotes 同時存有 SC_三旬匯率，一律比對 user_conversion_type，避免覆蓋。"""
     user_conversion_type = 'SC_銀行匯率'
+    if db == 'DWNotes':
+        match_conversion_type = True
 
     extra_on = "AND target.user_conversion_type = ?" if match_conversion_type else ""
 
     merge_sql = f"""
-        MERGE SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE AS target
+        MERGE {db}.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE AS target
         USING (SELECT ? AS from_currency, ? AS to_currency, ? AS from_conversion_date) AS src
         ON (
             target.from_currency = src.from_currency
@@ -669,65 +688,60 @@ def _execute_merge_rate(cursor, from_currency, to_currency, conversion_date,
 
     cursor.execute(merge_sql, params)
 
+def _merge_pairs(db, connect, pairs):
+    """pairs: list of (from_cur, to_cur, conversion_date, rate, rev_rate, match_type)，單一 transaction。"""
+    connection = connect()
+    if connection is None:
+        raise ConnectionError(f"{db} 資料庫連線失敗，請檢查 db_config.yaml 與網路連線。")
+    cursor = connection.cursor()
+    try:
+        for f_cur, t_cur, conv_date, rate, rev_rate, match_type in pairs:
+            _execute_merge_rate(cursor, f_cur, t_cur, conv_date, rate, rev_rate,
+                                match_conversion_type=match_type, db=db)
+        connection.commit()
+        logger.info(f"{db}: {len(pairs)} 筆銀行匯率 Upsert 成功")
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+        connection.close()
+
+def _write_bank_rate_pairs(pairs):
+    """先寫 DWNotes（主，失敗即 raise），再寫 SERVICE_TEST（輔，失敗只記錄、不中斷）。
+    回傳 SERVICE_TEST 的錯誤訊息；成功回傳 None。"""
+    _merge_pairs('DWNotes', connect_to_db_dwnotes, pairs)
+    try:
+        _merge_pairs('SERVICE_TEST', connect_to_db_sql, pairs)
+        return None
+    except Exception as e:
+        logger.warning(f"SERVICE_TEST（輔）寫入失敗，DWNotes 已寫入: {e}")
+        return str(e)
+
 def insert_daily_rate(rates, usd_rate):
-    """Insert TWD-based rates into SQL Server."""
+    """Insert TWD-based rates into DWNotes（主）與 SERVICE_TEST（輔）。回傳 SERVICE_TEST 錯誤或 None。"""
     combined_rates = rates.copy()
     combined_rates['USD'] = usd_rate
 
     conversion_date = (date.today() + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    connection = connect_to_db_sql()
-    if connection is None:
-        logger.error("無法建立資料庫連線，請檢查 db_config.yaml 與網路連線。")
-        raise ConnectionError("Database connection failed.")
+    pairs = []
+    for currency, rate in combined_rates.items():
+        rev_rate = 1 / rate if rate != 0 else 0
+        pairs.append((currency, 'TWD', conversion_date, rate, rev_rate, False))
+        pairs.append(('TWD', currency, conversion_date, rev_rate, rate, False))
 
-    cursor = connection.cursor()
-
-    try:
-        logger.info(f"開始寫入 {len(combined_rates)} 筆匯率資料...")
-
-        for currency, rate in combined_rates.items():
-            rev_rate = 1 / rate if rate != 0 else 0
-            _execute_merge_rate(cursor, currency, 'TWD', conversion_date, rate, rev_rate)
-            _execute_merge_rate(cursor, 'TWD', currency, conversion_date, rev_rate, rate)
-
-        connection.commit()
-        logger.info(f"insert_daily_rate(): 匯率資料 Upsert 成功 (日期: {conversion_date})")
-
-    except Exception as e:
-        logger.error("Error while insert data: %s", e)
-        connection.rollback()
-        raise
-    finally:
-        cursor.close()
-        connection.close()
+    logger.info(f"開始寫入 {len(combined_rates)} 種幣別匯率資料 (日期: {conversion_date})...")
+    return _write_bank_rate_pairs(pairs)
 
 def insert_usd_rates(rates_with_usd, conversion_date):
-    """Insert all USD-based rate pairs in a single transaction."""
-    connection = connect_to_db_sql()
-    if connection is None:
-        logger.error("無法建立資料庫連線，請檢查 db_config.yaml")
-        raise ConnectionError("Database connection failed.")
-
-    cursor = connection.cursor()
-
-    try:
-        for currency, rate_val in rates_with_usd.items():
-            rev_rate_val = 1 / rate_val if rate_val != 0 else 0
-            _execute_merge_rate(cursor, currency, 'USD', conversion_date,
-                                rate_val, rev_rate_val, match_conversion_type=True)
-            _execute_merge_rate(cursor, 'USD', currency, conversion_date,
-                                rev_rate_val, rate_val, match_conversion_type=True)
-
-        connection.commit()
-        logger.info(f"insert_usd_rates(): USD-based rates upsert completed ({len(rates_with_usd)} currencies)")
-    except Exception as e:
-        logger.error(f"Error while inserting USD rate data: {e}")
-        connection.rollback()
-        raise
-    finally:
-        cursor.close()
-        connection.close()
+    """Insert all USD-based rate pairs into DWNotes（主）與 SERVICE_TEST（輔）。回傳 SERVICE_TEST 錯誤或 None。"""
+    pairs = []
+    for currency, rate_val in rates_with_usd.items():
+        rev_rate_val = 1 / rate_val if rate_val != 0 else 0
+        pairs.append((currency, 'USD', conversion_date, rate_val, rev_rate_val, True))
+        pairs.append(('USD', currency, conversion_date, rev_rate_val, rate_val, True))
+    return _write_bank_rate_pairs(pairs)
 
 def insert_to_oracle(rates, usd_rate, usd_rows, conversion_date):
     """
@@ -887,7 +901,7 @@ def export_and_email_rates(
             df_web = pd.DataFrame(web_rows)
 
         # === Sheet 2: SQL Server ===
-        connection = connect_to_db_sql()
+        connection = connect_to_db_dwnotes()
         sql_query = """
         SELECT
             from_currency,
@@ -896,11 +910,11 @@ def export_and_email_rates(
             conversion_rate,
             inverse_conversion_rate
         FROM
-            SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+            DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
         WHERE
             from_conversion_date = (
                 SELECT MAX(from_conversion_date)
-                FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+                FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
                 WHERE user_conversion_type = N'SC_銀行匯率'
             )
             AND user_conversion_type = N'SC_銀行匯率'
@@ -1077,18 +1091,22 @@ def run():
         step_results.append(("Step 1: 抓取匯率", f"取得 {len(rates)} 種幣別匯率，USD/TWD = {usd_rate}"))
 
         # ===== Step 2: SQL Server - TWD-based 寫入 =====
-        current_step = "Step 2: SQL Server TWD-based 匯率寫入"
-        insert_daily_rate(rates, usd_rate)
+        current_step = "Step 2: SQL Server TWD-based 匯率寫入（DWNotes）"
+        st_error = insert_daily_rate(rates, usd_rate)
         twd_count = len(rates) + 1  # +1 for USD
         conversion_date_display = (date.today() + timedelta(days=1)).strftime('%Y-%m-%d')
-        step_results.append(("Step 2: SQL Server TWD", f"{twd_count} 筆匯率 Upsert 成功（日期: {conversion_date_display}）"))
+        step_results.append(("Step 2: SQL Server TWD（DWNotes）", f"{twd_count} 筆匯率 Upsert 成功（日期: {conversion_date_display}）"))
+        if st_error:
+            step_results.append(("Step 2: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
 
         # ===== Step 3: SQL Server - USD-based 計算與寫入 =====
-        current_step = "Step 3: SQL Server USD-based 匯率寫入"
+        current_step = "Step 3: SQL Server USD-based 匯率寫入（DWNotes）"
         logger.info("--- Starting USD Rates Calculation and Update ---")
         rows, rates_with_usd, conversion_date = get_daily_rate_with_usd(rates, usd_rate)
-        insert_usd_rates(rates_with_usd, conversion_date)
-        step_results.append(("Step 3: SQL Server USD", f"{len(rates_with_usd)} 筆 USD-based 匯率寫入完成"))
+        st_error = insert_usd_rates(rates_with_usd, conversion_date)
+        step_results.append(("Step 3: SQL Server USD（DWNotes）", f"{len(rates_with_usd)} 筆 USD-based 匯率寫入完成"))
+        if st_error:
+            step_results.append(("Step 3: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
 
         # ===== Step 4: Oracle 寫入 =====
         current_step = "Step 4: Oracle 匯率寫入"
@@ -1160,15 +1178,15 @@ def _export_daily_excel(rates, usd_rate, usd_rows, oracle_inserted_data,
         df_web = pd.DataFrame(web_rows)
 
         # === Sheet 2: SQL Server ===
-        connection = connect_to_db_sql()
+        connection = connect_to_db_dwnotes()
         sql_query = """
         SELECT
             from_currency, to_currency, from_conversion_date,
             conversion_rate, inverse_conversion_rate
-        FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+        FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
         WHERE from_conversion_date = (
                 SELECT MAX(from_conversion_date)
-                FROM SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
+                FROM DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE
                 WHERE user_conversion_type = N'SC_銀行匯率'
             )
             AND user_conversion_type = N'SC_銀行匯率'

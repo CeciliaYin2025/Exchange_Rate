@@ -383,78 +383,84 @@ class TestGetDailyRateFromTcb:
 # =========================================================================
 
 class TestInsertDailyRate:
-    """Tests for insert_daily_rate()."""
+    """Tests for insert_daily_rate(): DWNotes（主）先寫，SERVICE_TEST（輔）後寫。"""
 
-    def test_executes_merge_for_each_currency_bidirectional(self):
-        mock_cursor = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
+    @staticmethod
+    def _conn():
+        cur = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        return conn, cur
 
+    def test_writes_dwnotes_then_service_test_bidirectional(self):
+        dw, dw_cur = self._conn()
+        st, st_cur = self._conn()
         rates = {"EUR": 37.37, "JPY": 0.21}
-        usd_rate = 31.518
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=st):
+            assert idr.insert_daily_rate(rates, 31.518) is None
+        # rates + USD = 3 currencies, each bidirectional = 6 calls per DB
+        assert dw_cur.execute.call_count == 6
+        assert st_cur.execute.call_count == 6
+        assert "MERGE DWNotes.dbo" in dw_cur.execute.call_args_list[0][0][0]
+        assert "user_conversion_type = ?" in dw_cur.execute.call_args_list[0][0][0]
+        assert "MERGE SERVICE_TEST.dbo" in st_cur.execute.call_args_list[0][0][0]
+        dw.commit.assert_called_once()
+        st.commit.assert_called_once()
 
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=mock_conn):
-            idr.insert_daily_rate(rates, usd_rate)
-
-        # rates + USD = 3 currencies, each bidirectional = 6 calls
-        expected_calls = (len(rates) + 1) * 2
-        assert mock_cursor.execute.call_count == expected_calls
-        mock_conn.commit.assert_called_once()
-        mock_cursor.close.assert_called_once()
-        mock_conn.close.assert_called_once()
-
-    def test_connection_failure_raises(self):
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=None):
+    def test_dwnotes_connection_failure_raises(self):
+        st, st_cur = self._conn()
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=None), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=st):
             with pytest.raises(ConnectionError):
                 idr.insert_daily_rate({"EUR": 37.37}, 31.518)
+        st_cur.execute.assert_not_called()
 
-    def test_write_failure_rollbacks(self):
-        mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("DB write error")
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=mock_conn):
+    def test_dwnotes_write_failure_rollbacks(self):
+        dw, dw_cur = self._conn()
+        dw_cur.execute.side_effect = Exception("DB write error")
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=MagicMock()):
             with pytest.raises(Exception, match="DB write error"):
                 idr.insert_daily_rate({"EUR": 37.37}, 31.518)
+        dw.rollback.assert_called_once()
 
-        mock_conn.rollback.assert_called_once()
+    def test_service_test_failure_is_reported_not_raised(self):
+        dw, _ = self._conn()
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=None):
+            err = idr.insert_daily_rate({"EUR": 37.37}, 31.518)
+        assert err and "SERVICE_TEST" in err
+        dw.commit.assert_called_once()
 
 
 class TestInsertUsdRates:
     """Tests for insert_usd_rates()."""
 
-    def test_executes_merge_bidirectional(self):
-        mock_cursor = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
+    def test_executes_merge_bidirectional_in_both_dbs(self):
+        dw, dw_cur = TestInsertDailyRate._conn()
+        st, st_cur = TestInsertDailyRate._conn()
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=st):
+            assert idr.insert_usd_rates({"EUR": 1.1858, "CAD": 0.7337}, "2026-02-15") is None
+        # 2 currencies * 2 directions = 4 execute calls per DB
+        assert dw_cur.execute.call_count == 4
+        assert st_cur.execute.call_count == 4
 
-        rates_with_usd = {"EUR": 1.1858, "CAD": 0.7337}
-        conversion_date = "2026-02-15"
-
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=mock_conn):
-            idr.insert_usd_rates(rates_with_usd, conversion_date)
-
-        # 2 currencies * 2 directions = 4 execute calls
-        assert mock_cursor.execute.call_count == 4
-        mock_conn.commit.assert_called_once()
-
-    def test_connection_failure_raises(self):
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=None):
+    def test_dwnotes_connection_failure_raises(self):
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=None), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=MagicMock()):
             with pytest.raises(ConnectionError):
                 idr.insert_usd_rates({"EUR": 1.1858}, "2026-02-15")
 
-    def test_write_failure_rollbacks(self):
-        mock_cursor = MagicMock()
-        mock_cursor.execute.side_effect = Exception("DB error")
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-
-        with patch("ImportDailyRate.connect_to_db_sql", return_value=mock_conn):
+    def test_dwnotes_write_failure_rollbacks(self):
+        dw, dw_cur = TestInsertDailyRate._conn()
+        dw_cur.execute.side_effect = Exception("DB error")
+        with patch("ImportDailyRate.connect_to_db_dwnotes", return_value=dw), \
+             patch("ImportDailyRate.connect_to_db_sql", return_value=MagicMock()):
             with pytest.raises(Exception, match="DB error"):
                 idr.insert_usd_rates({"EUR": 1.1858}, "2026-02-15")
-
-        mock_conn.rollback.assert_called_once()
+        dw.rollback.assert_called_once()
 
 
 class TestInsertToOracle:
@@ -639,7 +645,7 @@ class TestExportAndEmailRates:
         ]
 
         with (
-            patch("ImportDailyRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportDailyRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportDailyRate.connect_to_db_oracle", return_value=None),
             patch("ImportDailyRate.send_email_notification", return_value=True) as mock_email,
         ):
@@ -674,7 +680,7 @@ class TestExportAndEmailRates:
                      "AUD": 20.5, "PHP": 0.56}
 
         with (
-            patch("ImportDailyRate.connect_to_db_sql", return_value=mock_sql_conn),
+            patch("ImportDailyRate.connect_to_db_dwnotes", return_value=mock_sql_conn),
             patch("ImportDailyRate.connect_to_db_oracle", side_effect=Exception("Oracle down")),
             patch("ImportDailyRate.send_email_notification", return_value=True),
         ):
