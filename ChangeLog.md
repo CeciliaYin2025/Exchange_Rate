@@ -10,7 +10,8 @@
 
 - 新增 `connect_to_db_dwnotes()`（讀 `db_config.yaml` 的 `database_notes`）
 - `_execute_merge_rate()` 新增 `db` 參數；寫 DWNotes 時比對 key 一律加上 `user_conversion_type`，不會覆蓋同日期的 `SC_三旬匯率`
-- 寫入順序：先 DWNotes（主，失敗即中斷，該步驟失敗、寄錯誤信、Airflow 重試），再 SERVICE_TEST（輔，失敗只在 Email 步驟表顯示「SERVICE_TEST（輔）失敗」，不中斷後續 Oracle 寫入）
+- 寫入順序：先 DWNotes（主，失敗即中斷，該步驟失敗、寄錯誤信、Airflow 重試），再 SERVICE_TEST（輔，失敗只記 log WARNING「SERVICE_TEST（輔）寫入失敗」，不中斷後續 Oracle 寫入）
+- Email 步驟名稱維持原樣，不顯示 DWNotes / SERVICE_TEST 等內部資料庫名稱（User 不需要知道）
 - `ImportWebRate.prepare_and_merge_sql_server()` 回傳值改為 `(rows, service_test_error)`
 - Excel 報表的 SQL Server 工作表改從 DWNotes 讀取
 - 每天寫入筆數：Daily 26 筆（TWD 16 + USD 10）、Web 6 筆，合計 32 筆

@@ -1091,22 +1091,19 @@ def run():
         step_results.append(("Step 1: 抓取匯率", f"取得 {len(rates)} 種幣別匯率，USD/TWD = {usd_rate}"))
 
         # ===== Step 2: SQL Server - TWD-based 寫入 =====
-        current_step = "Step 2: SQL Server TWD-based 匯率寫入（DWNotes）"
-        st_error = insert_daily_rate(rates, usd_rate)
+        # （SERVICE_TEST 輔助寫入失敗只記 log WARNING，不顯示在給 User 的信件中）
+        current_step = "Step 2: SQL Server TWD-based 匯率寫入"
+        insert_daily_rate(rates, usd_rate)
         twd_count = len(rates) + 1  # +1 for USD
         conversion_date_display = (date.today() + timedelta(days=1)).strftime('%Y-%m-%d')
-        step_results.append(("Step 2: SQL Server TWD（DWNotes）", f"{twd_count} 筆匯率 Upsert 成功（日期: {conversion_date_display}）"))
-        if st_error:
-            step_results.append(("Step 2: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
+        step_results.append(("Step 2: SQL Server TWD", f"{twd_count} 筆匯率 Upsert 成功（日期: {conversion_date_display}）"))
 
         # ===== Step 3: SQL Server - USD-based 計算與寫入 =====
-        current_step = "Step 3: SQL Server USD-based 匯率寫入（DWNotes）"
+        current_step = "Step 3: SQL Server USD-based 匯率寫入"
         logger.info("--- Starting USD Rates Calculation and Update ---")
         rows, rates_with_usd, conversion_date = get_daily_rate_with_usd(rates, usd_rate)
-        st_error = insert_usd_rates(rates_with_usd, conversion_date)
-        step_results.append(("Step 3: SQL Server USD（DWNotes）", f"{len(rates_with_usd)} 筆 USD-based 匯率寫入完成"))
-        if st_error:
-            step_results.append(("Step 3: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
+        insert_usd_rates(rates_with_usd, conversion_date)
+        step_results.append(("Step 3: SQL Server USD", f"{len(rates_with_usd)} 筆 USD-based 匯率寫入完成"))
 
         # ===== Step 4: Oracle 寫入 =====
         current_step = "Step 4: Oracle 匯率寫入"

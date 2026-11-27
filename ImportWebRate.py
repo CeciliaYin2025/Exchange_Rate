@@ -1112,11 +1112,10 @@ async def _async_run():
             }
 
         # ===== Step 3: SQL Server 寫入 =====
-        current_step = "Step 3: SQL Server 寫入（DWNotes）"
-        rows, st_error = prepare_and_merge_sql_server(all_rates, date.today() + timedelta(days=1))
-        step_results.append(("Step 3: SQL Server（DWNotes）", f"{len(rows)} 筆匯率 Upsert 成功"))
-        if st_error:
-            step_results.append(("Step 3: SERVICE_TEST（輔）", f"失敗 - {st_error}"))
+        # （SERVICE_TEST 輔助寫入失敗只記 log WARNING，不顯示在給 User 的信件中）
+        current_step = "Step 3: SQL Server 寫入"
+        rows, _ = prepare_and_merge_sql_server(all_rates, date.today() + timedelta(days=1))
+        step_results.append(("Step 3: SQL Server", f"{len(rows)} 筆匯率 Upsert 成功"))
 
         # ===== Step 4: Oracle 寫入 =====
         current_step = "Step 4: Oracle 寫入"
