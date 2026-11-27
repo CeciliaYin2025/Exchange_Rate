@@ -53,7 +53,7 @@ Each `Import*.py` script is **self-contained** — logging setup, DB connection,
 
 ### Database Patterns
 
-- **SQL Server target table**: `NOTES_SIM_GL_DAILY_RATES_INTERFACE` (in `SERVICE_TEST` or `DWNotes` database depending on script)
+- **SQL Server target table**: `NOTES_SIM_GL_DAILY_RATES_INTERFACE` — bank rates go to `DWNotes` (172.31.3.31, primary) then `SERVICE_TEST` (172.31.3.119, secondary); portal rates go to `DWNotes` only
 - **Oracle** (optional, ImportDailyRate/ImportWebRate): `YSC.SGLP0021_TEMP`
 - Rates are always stored **bidirectionally** (e.g., USD→TWD and TWD→USD with reciprocal rate)
 - `user_conversion_type` distinguishes: `SC_銀行匯率` (bank rates) vs `SC_三旬匯率` (portal rates)
@@ -61,16 +61,13 @@ Each `Import*.py` script is **self-contained** — logging setup, DB connection,
 - Rate fallback: if today's rate is unavailable, scripts look back up to 14 days
 
 **DB connection libraries differ by script:**
-- `ImportDailyRate.py` — SQLAlchemy + **pymssql** for SQL Server; oracledb **Thick mode** for Oracle
-- `ImportWebRate.py` — **pyodbc** for SQL Server; oracledb **Thin mode** for Oracle
-- `ImportPortalRate.py` — **mssql_python** for SQL Server (DWNotes); oracledb **Thick mode** for Oracle (insert: servicegate, query GL_DAILY_RATES_V: ypr)
-- Config priority: ImportDailyRate and ImportWebRate try `dev_db` first, fall back to `database`; ImportPortalRate uses `database` directly
+- All three scripts use **mssql-python** (`mssql_python.connect`) for SQL Server and oracledb **Thick mode** (Instant Client) for Oracle. pyodbc / SQLAlchemy remain in `pyproject.toml` but are no longer used by the Import scripts.
+- Oracle accounts: `servicegate` (insert into `YSC.SGLP0021_TEMP` + run `sglp0021_pkg.main`), `ypr` (query `GL_DAILY_RATES_V`)
+- Config keys: bank rates write `database_notes` (DWNotes, primary) then `dev_db` → `database` (SERVICE_TEST, secondary); ImportPortalRate uses `database_notes`, falling back to `database`
 
 ### MERGE SQL Variants
 
-Two patterns in the codebase:
-1. **Positional placeholders** (`?`) with tuple params — used by ImportDailyRate.py, ImportPortalRate.py
-2. **Named parameters** (`:param_name`) via SQLAlchemy `text()` — used by ImportWebRate.py
+All scripts use **positional placeholders** (`?`) with tuple params via mssql-python. ImportDailyRate / ImportWebRate take a `db` argument (`DWNotes` or `SERVICE_TEST`); writes to DWNotes always match on `user_conversion_type` so `SC_三旬匯率` rows are never overwritten. ImportPortalRate deletes the period's `SC_三旬匯率` rows and re-inserts instead of MERGE.
 
 ## Configuration
 

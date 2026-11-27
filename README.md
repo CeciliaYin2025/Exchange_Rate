@@ -72,9 +72,9 @@ cp config/email_config.yaml.sample config/email_config.yaml
 
 | 區段 | 用途 | 使用腳本 |
 |------|------|----------|
-| `dev_db` | SQL Server 開發環境 (優先) | ImportDailyRate, ImportWebRate |
+| `dev_db` | SQL Server SERVICE_TEST（銀行匯率輔助寫入，優先） | ImportDailyRate, ImportWebRate |
 | `database` | SQL Server (fallback) | ImportDailyRate, ImportWebRate |
-| `database_notes` | SQL Server DWNotes 資料庫 | ImportPortalRate |
+| `database_notes` | SQL Server DWNotes 資料庫（銀行匯率主要寫入、三旬匯率） | ImportDailyRate, ImportWebRate, ImportPortalRate |
 | `oracle_db_insert` | Oracle ERP 寫入 | 全部 |
 | `oracle_db_query` | Oracle ERP 查詢 | — |
 
@@ -128,10 +128,10 @@ DAG 檔案位於 `dags/exchange_rate_dag_job.py`，每天 17:30 (Asia/Taipei) �
 
 | Task | 命令 | 說明 | 重試設定 |
 |------|------|------|----------|
-| `import_bank_rate` | `docker compose run --rm exchange-rate bank` | RunAllRates.py (每日銀行匯率) | 失敗後 15 分鐘重試一次 |
+| `import_bank_rate` | `docker compose run --rm exchange-rate bank` | RunAllRates.py (每日銀行匯率) | 失敗後 5 分鐘重試一次 |
 | `import_portal_rate` | `docker compose run --rm exchange-rate portal` | ImportPortalRate.py (三旬匯率) | 不重試 |
 
-兩個 task 平行執行。`import_bank_rate` 設有自動重試，因 MXN / INR 來源網站偶有抓取失敗的情況。
+兩個 task **循序執行**（`run_bank >> run_portal`）：銀行匯率完成後才執行三旬匯率，因為 `APPS.sglp0021_pkg.main` 一次只能處理一筆，同時呼叫會回傳 retcode=1。兩者逾時皆為 600 秒。`import_bank_rate` 設有自動重試，因 MXN / INR 來源網站偶有抓取失敗的情況。
 
 **重試觸發條件：** `RunAllRates.py` 或 `ImportWebRate.py` 執行失敗時會以 exit code 1 結束，Docker container 將非零 exit code 回傳給 Airflow，觸發自動重試。
 
@@ -165,8 +165,8 @@ DailyExchangeRate/
 
 | 資料庫 | 表格 | 匯率類型 |
 |--------|------|----------|
-| SQL Server (`SERVICE_TEST`) | `NOTES_SIM_GL_DAILY_RATES_INTERFACE` | `SC_銀行匯率` (每日) |
-| SQL Server (`DWNotes`) | `NOTES_SIM_GL_DAILY_RATES_INTERFACE` | `SC_三旬匯率` (關務署) |
+| SQL Server (`DWNotes`，主) | `NOTES_SIM_GL_DAILY_RATES_INTERFACE` | `SC_銀行匯率` (每日，先寫) / `SC_三旬匯率` (關務署) |
+| SQL Server (`SERVICE_TEST`，輔) | `NOTES_SIM_GL_DAILY_RATES_INTERFACE` | `SC_銀行匯率` (每日，DWNotes 之後寫；失敗不中斷) |
 | Oracle TEMP | `YSC.SGLP0021_TEMP` | `SC_銀行匯率` / `SC_三旬匯率`（只寫正向） |
 | Oracle ERP | `APPS.GL_DAILY_RATES_V` | 由 `APPS.SGLP0021_PKG.MAIN` 轉入正式表 |
 

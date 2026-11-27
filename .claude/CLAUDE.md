@@ -30,7 +30,7 @@ Each `Import*.py` script is **self-contained** with its own copies of shared uti
 
 1. **Scrape** rates from bank websites (requests/BeautifulSoup for static pages, Selenium/Playwright for JS-rendered pages)
 2. **Calculate** derived rates (e.g., USD-based cross rates from TWD-based rates)
-3. **Upsert** into SQL Server using `MERGE` statements → table `SERVICE_TEST.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE`
+3. **Upsert** into SQL Server using `MERGE` statements → `DWNotes.dbo.NOTES_SIM_GL_DAILY_RATES_INTERFACE` (primary), then `SERVICE_TEST` (secondary, bank rates only)
 4. **Screenshot** source web pages as proof (saved to `snapshots/`)
 5. **Generate** Excel report (saved to `reports/`, deleted after email)
 6. **Email** results with inline screenshots and Excel attachment; error emails go to failure recipients
@@ -46,7 +46,7 @@ Each `Import*.py` script is **self-contained** with its own copies of shared uti
 ### Database Target
 
 - **SQL Server**: `NOTES_SIM_GL_DAILY_RATES_INTERFACE` table with MERGE (upsert) pattern
-- **Oracle** (optional, in ImportWebRate.py): `YSC.SGLP0021_TEMP` via SQLAlchemy + oracledb
+- **Oracle**: `YSC.SGLP0021_TEMP` via oracledb (Thick mode), then `APPS.sglp0021_pkg.main`; SQL Server via mssql-python
 - Rate rows are always written in both directions (e.g., USD→TWD and TWD→USD)
 - `user_conversion_type` distinguishes rate types: `SC_銀行匯率` (bank rates) vs `SC_三旬匯率` (portal rates)
 - `conversion_date` is typically set to **tomorrow** (today + 1 day) in ImportDailyRate.py

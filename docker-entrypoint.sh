@@ -19,7 +19,7 @@ case "$CMD" in
         echo "Usage: docker run <image> {bank|portal|shell}"
         echo ""
         echo "  bank    - RunAllRates.py (每日銀行匯率: CNY, EUR, GBP, CAD, AUD, JPY, PHP, USD, INR, MXN, TRY)"
-        echo "  portal  - ImportPortalRate.py (三旬匯率: EUR, JPY, USD)"
+        echo "  portal  - ImportPortalRate.py (三旬匯率: EUR, JPY, USD, CNY)"
         echo "  shell   - Interactive bash shell"
         exit 1
         ;;
